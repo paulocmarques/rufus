@@ -1,6 +1,6 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
- * Copyright © 2011-2020 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2021 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -120,7 +120,7 @@ BOOL advanced_mode_device, advanced_mode_format, allow_dual_uefi_bios, detect_fa
 BOOL use_fake_units, preserve_timestamps = FALSE, fast_zeroing = FALSE, app_changed_size = FALSE;
 BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE, enable_file_indexing, large_drive = FALSE;
 BOOL write_as_image = FALSE, write_as_esp = FALSE, installed_uefi_ntfs = FALSE, use_vds = FALSE, ignore_boot_marker = FALSE;
-BOOL windows_to_go_selected = FALSE;
+BOOL windows_to_go_selected = FALSE, appstore_version = FALSE;
 float fScale = 1.0f;
 int dialog_showing = 0, selection_default = BT_IMAGE, persistence_unit_selection = -1;
 int default_fs, fs_type, boot_type, partition_type, target_type; // file system, boot type, partition type, target type
@@ -1759,7 +1759,7 @@ static void InitDialog(HWND hDlg)
 	// Now that we have a title, we can find the handle of our Dialog
 	dialog_handle = FindWindowA(NULL, tmp);
 	uprintf(APPLICATION_NAME " " APPLICATION_ARCH " v%d.%d.%d%s%s", rufus_version[0], rufus_version[1], rufus_version[2],
-		IsAlphaOrBeta(), (ini_file != NULL)?"(Portable)":"");
+		IsAlphaOrBeta(), (ini_file != NULL)?"(Portable)": (appstore_version ? "(AppStore version)" : ""));
 	for (i = 0; i < ARRAYSIZE(resource); i++) {
 		len = 0;
 		buf = (char*)GetResource(hMainInstance, resource[i], _RT_RCDATA, "ldlinux_sys", &len, TRUE);
@@ -2588,14 +2588,20 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		fScale = GetDeviceCaps(hDC, LOGPIXELSX) / 96.0f;
 		safe_release_dc(hDlg, hDC);
 		apply_localization(IDD_DIALOG, hDlg);
-		SetUpdateCheck();
+		// The AppStore version always enables Fido
+		if (appstore_version)
+			SetFidoCheck();
+		else
+			SetUpdateCheck();
 		first_log_display = TRUE;
 		log_displayed = FALSE;
 		hLogDialog = MyCreateDialog(hMainInstance, IDD_LOG, hDlg, (DLGPROC)LogCallback);
 		InitDialog(hDlg);
 		GetDevices(0);
 		EnableControls(TRUE, FALSE);
-		CheckForUpdates(FALSE);
+		// The AppStore version does not need the internal check for updates
+		if (!appstore_version)
+			CheckForUpdates(FALSE);
 		// Register MEDIA_INSERTED/MEDIA_REMOVED notifications for card readers
 		if (SUCCEEDED(SHGetSpecialFolderLocation(0, CSIDL_DESKTOP, &pidlDesktop))) {
 			NotifyEntry.pidl = pidlDesktop;
@@ -3142,16 +3148,56 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// coverity[pointless_string_compare]
 	is_x86_32 = (strcmp(APPLICATION_ARCH, "x86") == 0);
 
+	// Retrieve various app & system directories.
+	if (GetCurrentDirectoryU(sizeof(app_dir), app_dir) == 0) {
+		uprintf("Could not get current directory: %s", WindowsErrorString());
+		app_dir[0] = 0;
+	}
+	if (GetSystemDirectoryU(system_dir, sizeof(system_dir)) == 0) {
+		uprintf("Could not get system directory: %s", WindowsErrorString());
+		static_strcpy(system_dir, "C:\\Windows\\System32");
+	}
+	if (GetTempPathU(sizeof(temp_dir), temp_dir) == 0) {
+		uprintf("Could not get temp directory: %s", WindowsErrorString());
+		static_strcpy(temp_dir, ".\\");
+	}
+	// Construct Sysnative ourselves as there is no GetSysnativeDirectory() call
+	// By default (64bit app running on 64 bit OS or 32 bit app running on 32 bit OS)
+	// Sysnative and System32 are the same
+	static_strcpy(sysnative_dir, system_dir);
+	// But if the app is 32 bit and the OS is 64 bit, Sysnative must differ from System32
+#if (!defined(_WIN64) && !defined(BUILD64))
+	if (is_x64()) {
+		if (GetSystemWindowsDirectoryU(sysnative_dir, sizeof(sysnative_dir)) == 0) {
+			uprintf("Could not get Windows directory: %s", WindowsErrorString());
+			static_strcpy(sysnative_dir, "C:\\Windows");
+		}
+		static_strcat(sysnative_dir, "\\Sysnative");
+	}
+#endif
+
+	// Look for a rufus.app file in the current app directory
+	// Since Microsoft makes it downright impossible to pass an arg in the app manifest
+	// and the automated VS2019 package building process doesn't like renaming the .exe
+	// right under its nose (else we would use the same trick as for portable vs regular)
+	// we use yet another workaround to detect if we are running the AppStore version...
+	static_sprintf(ini_path, "%s\\rufus.app", app_dir);
+	if (PathFileExistsU(ini_path)) {
+		appstore_version = TRUE;
+		goto skip_args_processing;
+	}
+
 	// We have to process the arguments before we acquire the lock and process the locale
 	PF_INIT(__wgetmainargs, Msvcrt);
 	if (pf__wgetmainargs != NULL) {
+		BOOL list_params = FALSE;
 		pf__wgetmainargs(&argc, &wargv, &wenv, 1, &si);
 		argv = (char**)calloc(argc, sizeof(char*));
 		if (argv != NULL) {
 			// Non getopt parameter check
 			for (i = 0; i < argc; i++) {
 				argv[i] = wchar_to_utf8(wargv[i]);
-				// Check for " /W" (wait for mutex release for pre 1.3.3 versions)
+				// Check for "/W" (wait for mutex release for pre 1.3.3 versions)
 				if (strcmp(argv[i], "/W") == 0)
 					wait_for_mutex = 150;	// Try to acquire the mutex for 15 seconds
 				// We need to find if we need to disable the hogger BEFORE we start
@@ -3159,6 +3205,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				// on the commandline then, which the hogger makes more intuitive.
 				if ((strcmp(argv[i], "-g") == 0) || (strcmp(argv[i], "--gui") == 0))
 					disable_hogger = TRUE;
+				// Check for "/InvokerPRAID", which may *STUPIDLY* be added by Microsoft
+				// when starting an app that was installed from the Windows store...
+				if (stricmp(argv[i], "/InvokerPRAID") == 0) {
+					appstore_version = TRUE;
+					goto skip_args_processing;
+				}
 			}
 			// If our application name contains a 'p' (for "portable") create a 'rufus.ini'
 			// NB: argv[0] is populated in the previous loop
@@ -3173,6 +3225,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			if (!disable_hogger) {
 				// Reattach the console, if we were started from commandline
 				if (AttachConsole(ATTACH_PARENT_PROCESS) != 0) {
+					uprintf("Enabling console line hogger");
 					attached_console = TRUE;
 					IGNORE_RETVAL(freopen("CONIN$", "r", stdin));
 					IGNORE_RETVAL(freopen("CONOUT$", "w", stdout));
@@ -3182,11 +3235,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				}
 			}
 
-			while ((opt = getopt_long(argc, argv, "?xghf:i:w:l:", long_options, &option_index)) != EOF) {
+			while ((opt = getopt_long(argc, argv, "xghf:i:w:l:", long_options, &option_index)) != EOF) {
 				switch (opt) {
 				case 'x':
 					enable_HDDs = TRUE;
 					break;
+				case 'a':
 				case 'g':
 					// No need to reprocess that option
 					break;
@@ -3227,50 +3281,35 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				case 'w':
 					wait_for_mutex = atoi(optarg);
 					break;
-				case '?':
 				case 'h':
-				default:
 					PrintUsage(argv[0]);
 					goto out;
+				// getopt_long returns '?' for any option it doesn't recognize
+				default:
+					list_params = TRUE;
+					break;
 				}
+			}
+			if (list_params) {
+				uprintf("Command line arguments:");
+				for (i = 1; i < argc; i++)
+					uprintf(argv[i]);
 			}
 		}
 	} else {
 		uprintf("Could not access UTF-16 args");
 	}
 
-	// Retrieve various app & system directories
-	if (GetCurrentDirectoryU(sizeof(app_dir), app_dir) == 0) {
-		uprintf("Could not get current directory: %s", WindowsErrorString());
-		app_dir[0] = 0;
-	}
-	if (GetSystemDirectoryU(system_dir, sizeof(system_dir)) == 0) {
-		uprintf("Could not get system directory: %s", WindowsErrorString());
-		static_strcpy(system_dir, "C:\\Windows\\System32");
-	}
-	if (GetTempPathU(sizeof(temp_dir), temp_dir) == 0) {
-		uprintf("Could not get temp directory: %s", WindowsErrorString());
-		static_strcpy(temp_dir, ".\\");
-	}
-	// Construct Sysnative ourselves as there is no GetSysnativeDirectory() call
-	// By default (64bit app running on 64 bit OS or 32 bit app running on 32 bit OS)
-	// Sysnative and System32 are the same
-	static_strcpy(sysnative_dir, system_dir);
-	// But if the app is 32 bit and the OS is 64 bit, Sysnative must differ from System32
-#if (!defined(_WIN64) && !defined(BUILD64))
-	if (is_x64()) {
-		if (GetSystemWindowsDirectoryU(sysnative_dir, sizeof(sysnative_dir)) == 0) {
-			uprintf("Could not get Windows directory: %s", WindowsErrorString());
-			static_strcpy(sysnative_dir, "C:\\Windows");
-		}
-		static_strcat(sysnative_dir, "\\Sysnative");
-	}
-#endif
+skip_args_processing:
+	if (appstore_version)
+		uprintf("AppStore version detected");
 
 	// Look for a .ini file in the current app directory
 	static_sprintf(ini_path, "%s\\rufus.ini", app_dir);
 	fd = fopenU(ini_path, ini_flags);	// Will create the file if portable mode is requested
-	vc |= (safe_strcmp(GetSignatureName(NULL, NULL), cert_name[0]) == 0);
+	// Using the string directly in safe_strcmp() would call GetSignatureName() twice
+	tmp = GetSignatureName(NULL, NULL);
+	vc |= (safe_strcmp(tmp, cert_name[0]) == 0);
 	if (fd != NULL) {
 		ini_file = ini_path;
 		fclose(fd);
@@ -3379,14 +3418,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		Sleep(100);
 		mutex = CreateMutexA(NULL, TRUE, "Global/" APPLICATION_NAME);
 	}
-	//if ((mutex == NULL) || (GetLastError() == ERROR_ALREADY_EXISTS)) {
-	//	// Load the translation before we print the error
-	//	get_loc_data_file(loc_file, selected_locale);
-	//	right_to_left_mode = ((selected_locale->ctrl_id) & LOC_RIGHT_TO_LEFT);
-	//	// Set MB_SYSTEMMODAL to prevent Far Manager from stealing focus...
-	//	MessageBoxExU(NULL, lmprintf(MSG_002), lmprintf(MSG_001), MB_ICONSTOP|MB_IS_RTL|MB_SYSTEMMODAL, selected_langid);
-	//	goto out;
-	//}
+	if ((mutex == NULL) || (GetLastError() == ERROR_ALREADY_EXISTS)) {
+		// Load the translation before we print the error
+		get_loc_data_file(loc_file, selected_locale);
+		right_to_left_mode = ((selected_locale->ctrl_id) & LOC_RIGHT_TO_LEFT);
+		// Set MB_SYSTEMMODAL to prevent Far Manager from stealing focus...
+		MessageBoxExU(NULL, lmprintf(MSG_002), lmprintf(MSG_001), MB_ICONSTOP|MB_IS_RTL|MB_SYSTEMMODAL, selected_langid);
+		goto out;
+	}
 
 	// Save instance of the application for further reference
 	hMainInstance = hInstance;
