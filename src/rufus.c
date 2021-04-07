@@ -22,7 +22,6 @@
 #include <crtdbg.h>
 #endif
 
-
 #include <windows.h>
 #include <windowsx.h>
 #include <stdlib.h>
@@ -51,6 +50,9 @@
 #include "cdio/logging.h"
 #include "../res/grub/grub_version.h"
 #include "../res/grub2/grub2_version.h"
+
+#define rufus    0
+#define appstore 1
 
 enum bootcheck_return {
 	BOOTCHECK_PROCEED = 0,
@@ -134,6 +136,7 @@ char *archive_path = NULL, image_option_txt[128], *fido_url = NULL;
 StrArray DriveId, DriveName, DriveLabel, DriveHub, BlockingProcess, ImageList;
 // Number of steps for each FS for FCC_STRUCTURE_PROGRESS
 const int nb_steps[FS_MAX] = { 5, 5, 12, 1, 10, 1, 1, 1, 1 };
+const char* appstore_chunk[2] = { "\\WindowsApps\\19453.net.Rufus", "y8nh7bq2a8dtt\\rufus" };
 const char* flash_type[BADLOCKS_PATTERN_TYPES] = { "SLC", "MLC", "TLC" };
 
 // TODO: Remember to update copyright year in stdlg's AboutCallback() WM_INITDIALOG,
@@ -1261,7 +1264,9 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 		// If we have an ISOHybrid, but without an ISO method we support, disable ISO support altogether
 		if (IS_DD_BOOTABLE(img_report) && (img_report.disable_iso ||
 				(!IS_BIOS_BOOTABLE(img_report) && !IS_EFI_BOOTABLE(img_report)))) {
-			uprintf("Note: ISO mode will be disabled because this ISOHybrid is not compatible with ISO boot.");
+			MessageBoxExU(hMainDialog, lmprintf(MSG_321), lmprintf(MSG_274, "ISOHybrid"),
+				MB_OK | MB_ICONINFORMATION | MB_IS_RTL, selected_langid);
+			uprintf("Note: DD image mode enforced since this ISOHybrid is not ISO mode compatible.");
 			img_report.is_iso = FALSE;
 		}
 		selection_default = BT_IMAGE;
@@ -1352,11 +1357,44 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			MessageBoxExU(hMainDialog, lmprintf(MSG_089), lmprintf(MSG_088), MB_OK|MB_ICONERROR|MB_IS_RTL, selected_langid);
 			goto out;
 		}
-		if (IS_DD_BOOTABLE(img_report) && !img_report.is_iso) {
-			// Pure DD images are fine at this stage
-			ret = BOOTCHECK_PROCEED;
-			goto out;
+		if (IS_DD_BOOTABLE(img_report)) {
+			if (!img_report.is_iso) {
+				// Pure DD images are fine at this stage
+				write_as_image = TRUE;
+			} else if (persistence_size == 0) {
+				// Ask users how they want to write ISOHybrid images,
+				// but only do so if persistence has not been selected.
+				char* iso_image = lmprintf(MSG_036);
+				char* dd_image = lmprintf(MSG_095);
+				// If the ISO is small enough to be written as an ESP and we are using GPT add the ISO → ESP option
+				if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE * MB) && HAS_REGULAR_EFI(img_report) &&
+					(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type)) {
+					char* choices[3] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP"), lmprintf(MSG_277, dd_image) };
+					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
+						choices, 3);
+					if (i < 0)	// Cancel
+						goto out;
+					else if (i == 2)
+						write_as_esp = TRUE;
+					else if (i == 3)
+						write_as_image = TRUE;
+				} else {
+					char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, dd_image) };
+					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
+						choices, 2);
+					if (i < 0)	// Cancel
+						goto out;
+					else if (i == 2)
+						write_as_image = TRUE;
+				}
+			}
 		}
+
+		if (write_as_image) {
+				ret = BOOTCHECK_PROCEED;
+				goto out;
+		}
+
 		if ((image_options & IMOP_WINTOGO) && ComboBox_GetCurItemData(hImageOption)) {
 			if (fs_type != FS_NTFS) {
 				// Windows To Go only works for NTFS
@@ -1412,7 +1450,20 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			goto out;
 		}
 
-		// If the selected target doesn't include include BIOS, skip file downloads for GRUB/Syslinux
+		if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE * MB) && HAS_REGULAR_EFI(img_report) &&
+			(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type)) {
+			// The ISO is small enough to be written as an ESP and we are using GPT
+			// so ask the users if they want to write it as an ESP.
+			char* iso_image = lmprintf(MSG_036);
+			char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP") };
+			i = SelectionDialog(lmprintf(MSG_274, "ESP"), lmprintf(MSG_310), choices, 2);
+			if (i < 0)	// Cancel
+				goto out;
+			else if (i == 2)
+				write_as_esp = TRUE;
+		}
+
+		// If the selected target doesn't include BIOS, skip file downloads for GRUB/Syslinux
 		if (target_type != TT_BIOS)
 			goto uefi_target;
 
@@ -2819,64 +2870,17 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				goto aborted_start;
 		}
 
-		if (!zero_drive) {
+		if (!zero_drive && (fs_type == FS_UDF)) {
 			// Display a warning about UDF formatting times
-			if (fs_type == FS_UDF) {
-				dur_secs = (uint32_t)(((double)SelectedDrive.DiskSize) / 1073741824.0f / UDF_FORMAT_SPEED);
-				if (dur_secs > UDF_FORMAT_WARN) {
-					dur_mins = dur_secs / 60;
-					dur_secs -= dur_mins * 60;
-					MessageBoxExU(hMainDialog, lmprintf(MSG_112, dur_mins, dur_secs), lmprintf(MSG_113),
-						MB_OK | MB_ICONASTERISK | MB_IS_RTL, selected_langid);
-				} else {
-					dur_secs = 0;
-					dur_mins = 0;
-				}
-			}
-
-			if ((boot_type == BT_IMAGE) && IS_DD_BOOTABLE(img_report)) {
-				if (img_report.is_iso) {
-					// Ask users how they want to write ISOHybrid images,
-					// but only do so if persistence has not been selected.
-					if (persistence_size == 0) {
-						char* iso_image = lmprintf(MSG_036);
-						char* dd_image = lmprintf(MSG_095);
-						// If the ISO is small enough to be written as an ESP and we are using GPT add the ISO → ESP option
-						if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE * MB) && HAS_REGULAR_EFI(img_report) &&
-							(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type)) {
-							char* choices[3] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP"), lmprintf(MSG_277, dd_image) };
-							i = SelectionDialog(lmprintf(MSG_274), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
-								choices, 3);
-							if (i < 0)	// Cancel
-								goto aborted_start;
-							else if (i == 2)
-								write_as_esp = TRUE;
-							else if (i == 3)
-								write_as_image = TRUE;
-						} else {
-							char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, dd_image) };
-							i = SelectionDialog(lmprintf(MSG_274), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
-								choices, 2);
-							if (i < 0)	// Cancel
-								goto aborted_start;
-							else if (i == 2)
-								write_as_image = TRUE;
-						}
-					}
-				} else {
-					write_as_image = TRUE;
-				}
-			} else if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE * MB) && HAS_REGULAR_EFI(img_report) &&
-				(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type)) {
-				// The ISO is small enough to be written as an ESP and we are using GPT
-				// so ask the users if they want to write it as an ESP.
-				char* iso_image = lmprintf(MSG_036);
-				char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP") };
-				i = SelectionDialog(lmprintf(MSG_274), lmprintf(MSG_310), choices, 2);
-				if (i < 0)	// Cancel
-					goto aborted_start;
-				else if (i == 2)
-					write_as_esp = TRUE;
+			dur_secs = (uint32_t)(((double)SelectedDrive.DiskSize) / 1073741824.0f / UDF_FORMAT_SPEED);
+			if (dur_secs > UDF_FORMAT_WARN) {
+				dur_mins = dur_secs / 60;
+				dur_secs -= dur_mins * 60;
+				MessageBoxExU(hMainDialog, lmprintf(MSG_112, dur_mins, dur_secs), lmprintf(MSG_113),
+					MB_OK | MB_ICONASTERISK | MB_IS_RTL, selected_langid);
+			} else {
+				dur_secs = 0;
+				dur_mins = 0;
 			}
 		}
 
@@ -3176,16 +3180,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 #endif
 
-	// Look for a rufus.app file in the current app directory
-	// Since Microsoft makes it downright impossible to pass an arg in the app manifest
-	// and the automated VS2019 package building process doesn't like renaming the .exe
-	// right under its nose (else we would use the same trick as for portable vs regular)
-	// we use yet another workaround to detect if we are running the AppStore version...
-	static_sprintf(ini_path, "%s\\rufus.app", app_dir);
-	if (PathFileExistsU(ini_path)) {
-		appstore_version = TRUE;
-		goto skip_args_processing;
-	}
+#if (SOLUTION == appstore)
+	appstore_version = TRUE;
+	for (i = 0; i < ARRAYSIZE(appstore_chunk); i++)
+		if (strstr(app_dir, appstore_chunk[0]) == NULL)
+			goto out;
+	goto skip_args_processing;
+#endif
 
 	// We have to process the arguments before we acquire the lock and process the locale
 	PF_INIT(__wgetmainargs, Msvcrt);
