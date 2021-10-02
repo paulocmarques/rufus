@@ -529,7 +529,7 @@ void AdjustForLowDPI(HWND hDlg)
 	for (i = 0; i < ARRAYSIZE(adjust_dpi_ids); i++) {
 		dy += ddy;
 		// "...and the other thing I really like about Microsoft's UI handling is how "
-		//."you never have to introduce weird hardcoded constants all over the place, "
+		// "you never have to introduce weird hardcoded constants all over the place, "
 		// "just to make your UI look good...", said NO ONE ever.
 		if (adjust_dpi_ids[i][0] == IDC_QUICK_FORMAT)
 			dy += 1;
@@ -726,7 +726,7 @@ void SetPersistenceSize(void)
 	uint64_t max = 0, pos = 0;
 
 	if (ComboBox_GetCurSel(hDeviceList) >= 0) {
-		max = SelectedDrive.DiskSize - img_report.projected_size;
+		max = SelectedDrive.DiskSize - PERCENTAGE(PROJECTED_SIZE_RATIO, img_report.projected_size);
 		persistence_size = min(persistence_size, max);
 		pos = persistence_size;
 

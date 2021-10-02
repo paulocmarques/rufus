@@ -75,10 +75,12 @@
 #define MAX_PARTITIONS              16			// Maximum number of partitions we handle
 #define MAX_ESP_TOGGLE              8			// Maximum number of entries we record to toggle GPT ESP back and forth
 #define MAX_ISO_TO_ESP_SIZE         512			// Maximum size we allow for the ISO → ESP option (in MB)
+#define MAX_DEFAULT_LIST_CARD_SIZE  200			// Size above which we don't list a card without enable HDD or Alt-F (in GB)
 #define MAX_SECTORS_TO_CLEAR        128			// nb sectors to zap when clearing the MBR/GPT (must be >34)
 #define MAX_WININST                 4			// Max number of install[.wim|.esd] we can handle on an image
 #define MBR_UEFI_MARKER             0x49464555	// 'U', 'E', 'F', 'I', as a 32 bit little endian longword
 #define MORE_INFO_URL               0xFFFF
+#define PROJECTED_SIZE_RATIO        110			// Percentage by which we inflate projected_size to prevent persistence overflow
 #define STATUS_MSG_TIMEOUT          3500		// How long should cheat mode messages appear for on the status bar
 #define WRITE_RETRIES               4
 #define WRITE_TIMEOUT               5000		// How long we should wait between write retries (in ms)
@@ -98,13 +100,13 @@
 #define BADBLOCK_PATTERN_SLC        {0x00, 0xff, 0x55, 0xaa}
 #define BADCLOCK_PATTERN_MLC        {0x00, 0xff, 0x33, 0xcc}
 #define BADBLOCK_PATTERN_TLC        {0x00, 0xff, 0x1c71c7, 0xe38e38}
-#define BADBLOCK_BLOCK_SIZE         (128 * 1024)
-#define LARGE_FAT32_SIZE            (32*1073741824LL)	// Size at which we need to use fat32format
+#define BADBLOCK_BLOCK_SIZE         (512 * 1024)
+#define LARGE_FAT32_SIZE            (32 * 1073741824LL)	// Size at which we need to use fat32format
 #define UDF_FORMAT_SPEED            3.1f		// Speed estimate at which we expect UDF drives to be formatted (GB/s)
 #define UDF_FORMAT_WARN             20			// Duration (in seconds) above which we warn about long UDF formatting times
 #define MAX_FAT32_SIZE              2.0f		// Threshold above which we disable FAT32 formatting (in TB)
 #define FAT32_CLUSTER_THRESHOLD     1.011f		// For FAT32, cluster size changes don't occur at power of 2 boundaries but sligthly above
-#define DD_BUFFER_SIZE              65536		// Minimum size of the buffer we use for DD operations
+#define DD_BUFFER_SIZE              (32 * 1024 * 1024)	// Minimum size of buffer to use for DD operations
 #define UBUFFER_SIZE                4096
 #define RSA_SIGNATURE_SIZE          256
 #define CBN_SELCHANGE_INTERNAL      (CBN_SELCHANGE + 256)
@@ -115,11 +117,11 @@
 #endif
 #define DOWNLOAD_URL                RUFUS_URL "/downloads"
 #define FILES_URL                   RUFUS_URL "/files"
+#define FILES_DIR                   APPLICATION_NAME
 #define FIDO_VERSION                "z1"
 #define SECURE_BOOT_MORE_INFO_URL   "https://github.com/pbatard/rufus/wiki/FAQ#Why_do_I_need_to_disable_Secure_Boot_to_use_UEFINTFS"
 #define WPPRECORDER_MORE_INFO_URL   "https://github.com/pbatard/rufus/wiki/FAQ#BSODs_with_Windows_To_Go_drives_created_from_Windows_10_1809_ISOs"
 #define SEVENZIP_URL                "https://www.7-zip.org"
-#define FILES_DIR                   "rufus_files"
 #define DEFAULT_ESP_MOUNT_POINT     "S:\\"
 #define IS_POWER_OF_2(x)            ((x != 0) && (((x) & ((x) - 1)) == 0))
 #define IGNORE_RETVAL(expr)         do { (void)(expr); } while(0)
@@ -129,6 +131,7 @@
 #ifndef STRINGIFY
 #define STRINGIFY(x)                #x
 #endif
+#define PERCENTAGE(percent, value)  ((1ULL * percent * value) / 100ULL)
 #define IsChecked(CheckBox_ID)      (IsDlgButtonChecked(hMainDialog, CheckBox_ID) == BST_CHECKED)
 #define MB_IS_RTL                   (right_to_left_mode?MB_RTLREADING|MB_RIGHT:0)
 #define CHECK_FOR_USER_CANCEL       if (IS_ERROR(FormatStatus) && (SCODE_CODE(FormatStatus) == ERROR_CANCELLED)) goto out
@@ -437,12 +440,13 @@ enum WindowsVersion {
 	WINDOWS_UNSUPPORTED = 0,
 	WINDOWS_XP = 0x51,
 	WINDOWS_2003 = 0x52,	// Also XP_64
-	WINDOWS_VISTA = 0x60,	// Also 2008
-	WINDOWS_7 = 0x61,		// Also 2008_R2
-	WINDOWS_8 = 0x62,		// Also 2012
-	WINDOWS_8_1 = 0x63,		// Also 2012_R2
+	WINDOWS_VISTA = 0x60,	// Also Server 2008
+	WINDOWS_7 = 0x61,		// Also Server 2008_R2
+	WINDOWS_8 = 0x62,		// Also Server 2012
+	WINDOWS_8_1 = 0x63,		// Also Server 2012_R2
 	WINDOWS_10_PREVIEW1 = 0x64,
-	WINDOWS_10 = 0xA0,
+	WINDOWS_10 = 0xA0,		// Also Server 2016, also Server 2019
+	WINDOWS_11 = 0xB0,		// Also Server 2022
 	WINDOWS_MAX
 };
 
@@ -480,7 +484,7 @@ extern int fs_type, boot_type, partition_type, target_type;
 extern unsigned long syslinux_ldlinux_len[2];
 extern char WindowsVersionStr[128], ubuffer[UBUFFER_SIZE], embedded_sl_version_str[2][12];
 extern char szFolderPath[MAX_PATH], app_dir[MAX_PATH], temp_dir[MAX_PATH], system_dir[MAX_PATH], sysnative_dir[MAX_PATH];
-extern char *image_path, *fido_url;
+extern char app_data_dir[MAX_PATH], *image_path, *fido_url;
 
 /*
  * Shared prototypes
@@ -572,7 +576,7 @@ extern uint8_t IsBootableImage(const char* path);
 extern BOOL AppendVHDFooter(const char* vhd_path);
 extern int SetWinToGoIndex(void);
 extern int IsHDD(DWORD DriveIndex, uint16_t vid, uint16_t pid, const char* strid);
-extern char* GetSignatureName(const char* path, const char* country_code);
+extern char* GetSignatureName(const char* path, const char* country_code, BOOL bSilent);
 extern uint64_t GetSignatureTimeStamp(const char* path);
 extern LONG ValidateSignature(HWND hDlg, const char* path);
 extern BOOL ValidateOpensslSignature(BYTE* pbBuffer, DWORD dwBufferLen, BYTE* pbSignature, DWORD dwSigLen);
@@ -658,7 +662,7 @@ static __inline HMODULE GetLibraryHandle(char* szLibraryName) {
 		if (OpenedLibrariesHandleSize >= MAX_LIBRARY_HANDLES) {
 			uprintf("Error: MAX_LIBRARY_HANDLES is too small\n");
 		} else {
-			h = LoadLibraryA(szLibraryName);
+			h = LoadLibraryExA(szLibraryName, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
 			if (h != NULL)
 				OpenedLibrariesHandle[OpenedLibrariesHandleSize++] = h;
 		}

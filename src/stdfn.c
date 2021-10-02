@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Standard Windows function calls
- * Copyright © 2013-2019 Pete Batard <pete@akeo.ie>
+ * Copyright © 2013-2021 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -239,10 +239,84 @@ int GetCpuArch(void)
 	}
 }
 
-// From smartmontools os_win32.cpp
+static const char* GetEdition(DWORD ProductType)
+{
+	// From: https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getproductinfo
+	// These values can be found in the winnt.h header.
+	switch (ProductType) {
+	case 0x00000000: return "";	//  Undefined
+	case 0x00000001: return "Ultimate";
+	case 0x00000002: return "Home Basic";
+	case 0x00000003: return "Home Premium";
+	case 0x00000004: return "Enterprise";
+	case 0x00000005: return "Home Basic N";
+	case 0x00000006: return "Business";
+	case 0x00000007: return "Standard Server";
+	case 0x00000008: return "Datacenter Server";
+	case 0x00000009: return "Smallbusiness Server";
+	case 0x0000000A: return "Enterprise Server";
+	case 0x0000000B: return "Starter";
+	case 0x00000010: return "Business N";
+	case 0x00000011: return "Web Server";
+	case 0x00000012: return "Cluster Server";
+	case 0x00000013: return "Home Server";
+	case 0x0000001A: return "Home Premium N";
+	case 0x0000001B: return "Enterprise N";
+	case 0x0000001C: return "Ultimate N";
+	case 0x00000022: return "Home Premium Server";
+	case 0x0000002F: return "Starter N";
+	case 0x00000030: return "Pro";
+	case 0x00000031: return "Pro N";
+	case 0x00000042: return "Starter E";
+	case 0x00000043: return "Home Basic E";
+	case 0x00000044: return "Premium E";
+	case 0x00000045: return "Pro E";
+	case 0x00000046: return "Enterprise E";
+	case 0x00000047: return "Ultimate E";
+	case 0x00000048: return "Enterprise Eval";
+	case 0x00000054: return "Enterprise N Eval";
+	case 0x00000057: return "Thin PC";
+	case 0x0000006F: return "Core Connected";
+	case 0x00000070: return "Pro Student";
+	case 0x00000071: return "Core Connected N";
+	case 0x00000072: return "Pro Student N";
+	case 0x00000073: return "Core Connected Single Language";
+	case 0x00000074: return "Core Connected China";
+	case 0x00000079: return "Edu";
+	case 0x0000007A: return "Edu N";
+	case 0x0000007D: return "Enterprise S";
+	case 0x0000007E: return "Enterprise S N";
+	case 0x0000007F: return "Pro S";
+	case 0x00000080: return "Pro S N";
+	case 0x00000081: return "Enterprise S Eval";
+	case 0x00000082: return "Enterprise S N Eval";
+	case 0x0000008A: return "Pro Single Language";
+	case 0x0000008B: return "Pro China";
+	case 0x0000008C: return "Enterprise Subscription";
+	case 0x0000008D: return "Enterprise Subscription N";
+	case 0x00000095: return "Utility VM";
+	case 0x000000A1: return "Pro Workstation";
+	case 0x000000A2: return "Pro Workstation N";
+	case 0x000000A4: return "Pro for Education";
+	case 0x000000A5: return "Pro for Education N";
+	case 0x000000AB: return "Enterprise G";	// I swear Microsoft are just making up editions...
+	case 0x000000AC: return "Enterprise G N";
+	case 0x000000B6: return "Core OS";
+	case 0x000000B7: return "Cloud E";
+	case 0x000000B8: return "Cloud E N";
+	case 0x000000BD: return "Lite";
+	case 0xABCDABCD: return "(Unlicensed)";
+	default: return "(Unknown Edition)";
+	}
+}
+
+/*
+ * Modified from smartmontools' os_win32.cpp
+ */
 void GetWindowsVersion(void)
 {
 	OSVERSIONINFOEXA vi, vi2;
+	DWORD dwProductType;
 	const char* w = 0;
 	const char* w64 = "32 bit";
 	char *vptr;
@@ -299,28 +373,35 @@ void GetWindowsVersion(void)
 			ws = (vi.wProductType <= VER_NT_WORKSTATION);
 			nWindowsVersion = vi.dwMajorVersion << 4 | vi.dwMinorVersion;
 			switch (nWindowsVersion) {
-			case 0x51: w = "XP";
+			case WINDOWS_XP: w = "XP";
 				break;
-			case 0x52: w = (!GetSystemMetrics(89)?"Server 2003":"Server 2003_R2");
+			case WINDOWS_2003: w = (ws ? "XP_64" : (!GetSystemMetrics(89) ? "Server 2003" : "Server 2003_R2"));
 				break;
-			case 0x60: w = (ws?"Vista":"Server 2008");
+			case WINDOWS_VISTA: w = (ws ? "Vista" : "Server 2008");
 				break;
-			case 0x61: w = (ws?"7":"Server 2008_R2");
+			case WINDOWS_7: w = (ws ? "7" : "Server 2008_R2");
 				break;
-			case 0x62: w = (ws?"8":"Server 2012");
+			case WINDOWS_8: w = (ws ? "8" : "Server 2012");
 				break;
-			case 0x63: w = (ws?"8.1":"Server 2012_R2");
+			case WINDOWS_8_1: w = (ws ? "8.1" : "Server 2012_R2");
 				break;
-			case 0x64: w = (ws?"10 (Preview 1)":"Server 10 (Preview 1)");
+			case WINDOWS_10_PREVIEW1: w = (ws ? "10 (Preview 1)" : "Server 10 (Preview 1)");
 				break;
 			// Starting with Windows 10 Preview 2, the major is the same as the public-facing version
-			case 0xA0: w = (ws?"10":"Server 2016");
+			case WINDOWS_10:
+				if (vi.dwBuildNumber < 20000) {
+					w = (ws ? "10" : ((vi.dwBuildNumber < 17763) ? "Server 2016" : "Server 2019"));
+					break;
+				}
+				nWindowsVersion = WINDOWS_11;
+				// Fall through
+			case WINDOWS_11: w = (ws ? "11" : "Server 2022");
 				break;
 			default:
-				if (nWindowsVersion < 0x51)
+				if (nWindowsVersion < WINDOWS_XP)
 					nWindowsVersion = WINDOWS_UNSUPPORTED;
 				else
-					w = "11 or later";
+					w = "12 or later";
 				break;
 			}
 		}
@@ -329,6 +410,7 @@ void GetWindowsVersion(void)
 	if (is_x64())
 		w64 = "64-bit";
 
+	GetProductInfo(vi.dwMajorVersion, vi.dwMinorVersion, vi.wServicePackMajor, vi.wServicePackMinor, &dwProductType);
 	vptr = &WindowsVersionStr[sizeof("Windows ") - 1];
 	vlen = sizeof(WindowsVersionStr) - sizeof("Windows ") - 1;
 	if (!w)
@@ -339,7 +421,8 @@ void GetWindowsVersion(void)
 	else if (vi.wServicePackMajor)
 		safe_sprintf(vptr, vlen, "%s SP%u %s", w, vi.wServicePackMajor, w64);
 	else
-		safe_sprintf(vptr, vlen, "%s %s", w, w64);
+		safe_sprintf(vptr, vlen, "%s%s%s, %s",
+			w, (dwProductType != PRODUCT_UNDEFINED) ? " " : "", GetEdition(dwProductType), w64);
 
 	// Add the build number (including UBR if available) for Windows 8.0 and later
 	nWindowsBuildNumber = vi.dwBuildNumber;
@@ -721,7 +804,7 @@ DWORD WINAPI SetLGPThread(LPVOID param)
 	GUID snap_guid = { 0x3D271CFCL, 0x2BC6, 0x4AC2, {0xB6, 0x33, 0x3B, 0xDF, 0xF5, 0xBD, 0xAB, 0x2A} };
 
 	// Reinitialize COM since it's not shared between threads
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 
 	// We need an IGroupPolicyObject instance to set a Local Group Policy
 	hr = CoCreateInstance(&my_CLSID_GroupPolicyObject, NULL, CLSCTX_INPROC_SERVER, &my_IID_IGroupPolicyObject, (LPVOID*)&pLGPO);
@@ -797,6 +880,7 @@ error:
 		RegCloseKey(path_key);
 	if (pLGPO != NULL)
 		pLGPO->lpVtbl->Release(pLGPO);
+	CoUninitialize();
 	return FALSE;
 }
 

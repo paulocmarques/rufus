@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Networking functionality (web file download, check for update, etc.)
- * Copyright © 2012-2019 Pete Batard <pete@akeo.ie>
+ * Copyright © 2012-2021 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -52,7 +52,7 @@ HANDLE update_check_thread = NULL;
 
 extern loc_cmd* selected_locale;
 extern HANDLE dialog_handle;
-extern BOOL is_x86_32, close_fido_cookie_prompts;
+extern BOOL is_x86_32;
 static DWORD error_code, fido_len = 0;
 static BOOL force_update_check = FALSE;
 static const char* request_headers = "Accept-Encoding: gzip, deflate";
@@ -279,7 +279,7 @@ static HINTERNET GetInternetSession(BOOL bRetry)
 	PF_INIT_OR_OUT(InternetSetOptionA, WinInet);
 
 	// Create a NetworkListManager Instance to check the network connection
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 	hr = CoCreateInstance(&CLSID_NetworkListManager, NULL, CLSCTX_ALL,
 		&IID_INetworkListManager, (LPVOID*)&pNetworkListManager);
 	if (hr == S_OK) {
@@ -363,7 +363,7 @@ uint64_t DownloadToFileOrBuffer(const char* url, const char* file, BYTE** buffer
 	short_name = (file != NULL) ? PathFindFileNameU(file) : PathFindFileNameU(url);
 
 	if (hProgressDialog != NULL) {
-		PrintInfo(0, MSG_085, short_name);
+		PrintInfo(5000, MSG_085, short_name);
 		uprintf("Downloading %s", url);
 	}
 
@@ -422,7 +422,7 @@ uint64_t DownloadToFileOrBuffer(const char* url, const char* file, BYTE** buffer
 			static_sprintf(msg, "(%s) %s", SizeToHumanReadable(total_size, FALSE, FALSE), GetShortName(url));
 		else
 			static_sprintf(msg, "%s (%s)", GetShortName(url), SizeToHumanReadable(total_size, FALSE, FALSE));
-		PrintStatus(0, MSG_085, msg);
+		PrintStatus(5000, MSG_085, msg);
 	}
 
 	if (file != NULL) {
@@ -644,7 +644,7 @@ static DWORD WINAPI CheckForUpdatesThread(LPVOID param)
 
 	verbose = ReadSetting32(SETTING_VERBOSE_UPDATES);
 	// Without this the FileDialog will produce error 0x8001010E when compiled for Vista or later
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 	// Unless the update was forced, wait a while before performing the update check
 	if (!force_update_check) {
 		// It would of course be a lot nicer to use a timer and wake the thread, but my
@@ -851,6 +851,7 @@ out:
 	}
 	force_update_check = FALSE;
 	update_check_thread = NULL;
+	CoUninitialize();
 	ExitThread(0);
 }
 
@@ -887,7 +888,7 @@ static DWORD WINAPI DownloadISOThread(LPVOID param)
 	GUID guid;
 
 	dialog_showing++;
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 
 	// Use a GUID as random unique string, else ill-intentioned security "researchers"
 	// may either spam our pipe or replace our script to fool antivirus solutions into
@@ -917,7 +918,7 @@ static DWORD WINAPI DownloadISOThread(LPVOID param)
 		static_sprintf(sig_url, "%s.sig", fido_url);
 		dwSize = (DWORD)DownloadToFileOrBuffer(sig_url, NULL, &sig, NULL, FALSE);
 		if ((dwSize != RSA_SIGNATURE_SIZE) || (!ValidateOpensslSignature(compressed, dwCompressedSize, sig, dwSize))) {
-			uprintf("FATAL: Signature is invalid ✗");
+			uprintf("FATAL: Download signature is invalid ✗");
 			FormatStatus = ERROR_SEVERITY_ERROR | FAC(FACILITY_STORAGE) | APPERR(ERROR_BAD_SIGNATURE);
 			SendMessage(hProgress, PBM_SETSTATE, (WPARAM)PBST_ERROR, 0);
 			SetTaskbarProgressState(TASKBAR_ERROR);
@@ -926,7 +927,7 @@ static DWORD WINAPI DownloadISOThread(LPVOID param)
 			goto out;
 		}
 		free(sig);
-		uprintf("Signature is valid ✓");
+		uprintf("Download signature is valid ✓");
 		uncompressed_size = *((uint64_t*)&compressed[5]);
 		if ((uncompressed_size < 1 * MB) && (bled_init(_uprintf, NULL, NULL, NULL, NULL, &FormatStatus) >= 0)) {
 			fido_script = malloc((size_t)uncompressed_size);
@@ -982,13 +983,22 @@ static DWORD WINAPI DownloadISOThread(LPVOID param)
 	}
 
 	static_sprintf(cmdline, "\"%s\" -NonInteractive -Sta -NoProfile –ExecutionPolicy Bypass "
-		"-File \"%s\" -DisableFirstRunCustomize -PipeName %s -LocData \"%s\" -Icon \"%s\" -AppTitle \"%s\"",
+		"-File \"%s\" -PipeName %s -LocData \"%s\" -Icon \"%s\" -AppTitle \"%s\"",
 		powershell_path, script_path, &pipe[9], locale_str, icon_path, lmprintf(MSG_149));
-	// Signal our Windows alert hook that it should close the IE cookie prompts from Fido
-	close_fido_cookie_prompts = TRUE;
-	dwExitCode = RunCommand(cmdline, app_dir, TRUE);
+
+	// For extra security, even after we validated that the LZMA download is properly
+	// signed, we also validate the Authenticode signature of the local script.
+	if (ValidateSignature(INVALID_HANDLE_VALUE, script_path) != NO_ERROR) {
+		uprintf("FATAL: Script signature is invalid ✗");
+		FormatStatus = ERROR_SEVERITY_ERROR | FAC(FACILITY_STORAGE) | APPERR(ERROR_BAD_SIGNATURE);
+		SendMessage(hProgress, PBM_SETSTATE, (WPARAM)PBST_ERROR, 0);
+		SetTaskbarProgressState(TASKBAR_ERROR);
+		goto out;
+	}
+	uprintf("Script signature is valid ✓");
+
+	dwExitCode = RunCommand(cmdline, app_data_dir, TRUE);
 	uprintf("Exited download script with code: %d", dwExitCode);
-	close_fido_cookie_prompts = FALSE;
 	if ((dwExitCode == 0) && PeekNamedPipe(hPipe, NULL, dwPipeSize, NULL, &dwAvail, NULL) && (dwAvail != 0)) {
 		url = malloc(dwAvail + 1);
 		dwSize = 0;
@@ -1047,6 +1057,7 @@ out:
 	free(url);
 	SendMessage(hMainDialog, UM_ENABLE_CONTROLS, 0, 0);
 	dialog_showing--;
+	CoUninitialize();
 	ExitThread(dwExitCode);
 }
 

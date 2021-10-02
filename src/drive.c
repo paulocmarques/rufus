@@ -458,7 +458,7 @@ BOOL RefreshLayout(DWORD DriveIndex)
 	wnsprintf(wPhysicalName, ARRAYSIZE(wPhysicalName), L"\\\\?\\PhysicalDrive%lu", DriveIndex);
 
 	// Initialize COM
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 	IGNORE_RETVAL(CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_CONNECT,
 		RPC_C_IMP_LEVEL_IMPERSONATE, NULL, 0, NULL));
 
@@ -541,7 +541,7 @@ static BOOL GetVdsDiskInterface(DWORD DriveIndex, const IID* InterfaceIID, void*
 	wnsprintf(wPhysicalName, ARRAYSIZE(wPhysicalName), L"\\\\?\\PhysicalDrive%lu", DriveIndex);
 
 	// Initialize COM
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 	IGNORE_RETVAL(CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_CONNECT,
 		RPC_C_IMP_LEVEL_IMPERSONATE, NULL, 0, NULL));
 
@@ -689,7 +689,7 @@ BOOL VdsRescan(DWORD dwRescanType, DWORD dwSleepTime, BOOL bSilent)
 	IVdsServiceLoader* pLoader;
 	IVdsService* pService;
 
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 	IGNORE_RETVAL(CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_CONNECT,
 		RPC_C_IMP_LEVEL_IMPERSONATE, NULL, 0, NULL));
 
@@ -748,9 +748,9 @@ BOOL VdsRescan(DWORD dwRescanType, DWORD dwSleepTime, BOOL bSilent)
 BOOL DeletePartition(DWORD DriveIndex, ULONGLONG PartitionOffset, BOOL bSilent)
 {
 	HRESULT hr = S_FALSE;
-	VDS_PARTITION_PROP* prop_array;
+	VDS_PARTITION_PROP* prop_array = NULL;
 	LONG i, prop_array_size;
-	IVdsAdvancedDisk *pAdvancedDisk;
+	IVdsAdvancedDisk *pAdvancedDisk = NULL;
 
 	if (!GetVdsDiskInterface(DriveIndex, &IID_IVdsAdvancedDisk, (void**)&pAdvancedDisk, bSilent))
 		return FALSE;
@@ -806,7 +806,7 @@ BOOL ListVdsVolumes(BOOL bSilent)
 	IUnknown* pUnk;
 
 	// Initialize COM
-	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
 	IGNORE_RETVAL(CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_CONNECT,
 		RPC_C_IMP_LEVEL_IMPERSONATE, NULL, 0, NULL));
 
@@ -1698,8 +1698,7 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 					SelectedDrive.PartitionOffset[i] = DriveLayout->PartitionEntry[i].StartingOffset.QuadPart;
 					SelectedDrive.PartitionSize[i] = DriveLayout->PartitionEntry[i].PartitionLength.QuadPart;
 				}
-				// NB: MinGW's gcc 4.9.2 broke "%lld" printout on XP so we use the inttypes.h "PRI##" qualifiers
-				suprintf("  Type: %s (0x%02x)\r\n  Size: %s (%" PRIi64 " bytes)\r\n  Start Sector: %" PRIi64 ", Boot: %s",
+				suprintf("  Type: %s (0x%02x)\r\n  Size: %s (%lld bytes)\r\n  Start Sector: %lld, Boot: %s",
 					((part_type == 0x07 || super_floppy_disk) && (FileSystemName[0] != 0)) ?
 					FileSystemName : GetMBRPartitionType(part_type), super_floppy_disk ? 0: part_type,
 					SizeToHumanReadable(DriveLayout->PartitionEntry[i].PartitionLength.QuadPart, TRUE, FALSE),
@@ -2041,6 +2040,9 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 			ClusterSize = 0x200;
 		DriveLayoutEx.PartitionEntry[pn].StartingOffset.QuadPart =
 			((bytes_per_track + (ClusterSize - 1)) / ClusterSize) * ClusterSize;
+		// GRUB2 no longer fits in the usual 31½ KB that the above computation provides
+		// so just unconditionally double that size and get on with it.
+		DriveLayoutEx.PartitionEntry[pn].StartingOffset.QuadPart *= 2;
 	}
 
 	// Having the ESP up front may help (and is the Microsoft recommended way) but this
@@ -2175,7 +2177,7 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 		// Should end on a track boundary
 		DriveLayoutEx.PartitionEntry[pn].StartingOffset.QuadPart = DriveLayoutEx.PartitionEntry[pn-1].StartingOffset.QuadPart +
 			DriveLayoutEx.PartitionEntry[pn-1].PartitionLength.QuadPart;
-		DriveLayoutEx.PartitionEntry[pn].PartitionLength.QuadPart = (extra_partitions & XP_UEFI_NTFS)?uefi_ntfs_size:
+		DriveLayoutEx.PartitionEntry[pn].PartitionLength.QuadPart = (extra_partitions & XP_UEFI_NTFS) ? uefi_ntfs_size :
 			extra_part_size_in_tracks * bytes_per_track;
 		uprintf("● Creating %S Partition (offset: %lld, size: %s)", extra_part_name, DriveLayoutEx.PartitionEntry[pn].StartingOffset.QuadPart,
 			SizeToHumanReadable(DriveLayoutEx.PartitionEntry[pn].PartitionLength.QuadPart, TRUE, FALSE));
@@ -2188,6 +2190,14 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 
 		if (partition_style == PARTITION_STYLE_GPT) {
 			DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = (extra_partitions & XP_ESP) ? PARTITION_GENERIC_ESP : PARTITION_MICROSOFT_DATA;
+			if (extra_partitions & XP_UEFI_NTFS) {
+				// Prevent a drive letter to be assigned to the UEFI:NTFS partition
+				DriveLayoutEx.PartitionEntry[pn].Gpt.Attributes = GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER;
+#if !defined(_DEBUG)
+				// Also make the partition read-only for release versions
+				DriveLayoutEx.PartitionEntry[pn].Gpt.Attributes += GPT_BASIC_DATA_ATTRIBUTE_READ_ONLY;
+#endif
+			}
 			IGNORE_RETVAL(CoCreateGuid(&DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionId));
 			wcsncpy(DriveLayoutEx.PartitionEntry[pn].Gpt.Name, (extra_partitions & XP_ESP) ? L"EFI System Partition" : extra_part_name,
 				ARRAYSIZE(DriveLayoutEx.PartitionEntry[pn].Gpt.Name));
