@@ -24,6 +24,7 @@
 #include <windows.h>
 #include <sddl.h>
 #include <gpedit.h>
+#include <assert.h>
 
 #include "rufus.h"
 #include "missing.h"
@@ -33,8 +34,9 @@
 
 #include "settings.h"
 
-int  nWindowsVersion = WINDOWS_UNDEFINED;
-int  nWindowsBuildNumber = -1;
+int nWindowsVersion = WINDOWS_UNDEFINED;
+int nWindowsBuildNumber = -1;
+int nWindowsEdition = 0;
 char WindowsVersionStr[128] = "Windows ";
 
 /*
@@ -241,6 +243,8 @@ int GetCpuArch(void)
 
 static const char* GetEdition(DWORD ProductType)
 {
+	static char unknown_edition_str[64];
+
 	// From: https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getproductinfo
 	// These values can be found in the winnt.h header.
 	switch (ProductType) {
@@ -251,62 +255,88 @@ static const char* GetEdition(DWORD ProductType)
 	case 0x00000004: return "Enterprise";
 	case 0x00000005: return "Home Basic N";
 	case 0x00000006: return "Business";
-	case 0x00000007: return "Standard Server";
-	case 0x00000008: return "Datacenter Server";
+	case 0x00000007: return "Server Standard";
+	case 0x00000008: return "Server Datacenter";
 	case 0x00000009: return "Smallbusiness Server";
-	case 0x0000000A: return "Enterprise Server";
+	case 0x0000000A: return "Server Enterprise";
 	case 0x0000000B: return "Starter";
+	case 0x0000000C: return "Server Datacenter (Core)";
+	case 0x0000000D: return "Server Standard (Core)";
+	case 0x0000000E: return "Server Enterprise (Core)";
 	case 0x00000010: return "Business N";
 	case 0x00000011: return "Web Server";
-	case 0x00000012: return "Cluster Server";
-	case 0x00000013: return "Home Server";
+	case 0x00000012: return "HPC Edition";
+	case 0x00000013: return "Storage Server (Essentials)";
 	case 0x0000001A: return "Home Premium N";
 	case 0x0000001B: return "Enterprise N";
 	case 0x0000001C: return "Ultimate N";
-	case 0x00000022: return "Home Premium Server";
+	case 0x00000022: return "Home Server";
+	case 0x00000024: return "Server Standard without Hyper-V";
+	case 0x00000025: return "Server Datacenter without Hyper-V";
+	case 0x00000026: return "Server Enterprise without Hyper-V";
+	case 0x00000027: return "Server Datacenter without Hyper-V (Core)";
+	case 0x00000028: return "Server Standard without Hyper-V (Core)";
+	case 0x00000029: return "Server Enterprise without Hyper-V (Core)";
+	case 0x0000002A: return "Hyper-V Server";
 	case 0x0000002F: return "Starter N";
 	case 0x00000030: return "Pro";
 	case 0x00000031: return "Pro N";
+	case 0x00000034: return "Server Solutions Premium";
+	case 0x00000035: return "Server Solutions Premium (Core)";
+	case 0x00000040: return "Server Hyper Core V";
 	case 0x00000042: return "Starter E";
 	case 0x00000043: return "Home Basic E";
 	case 0x00000044: return "Premium E";
 	case 0x00000045: return "Pro E";
 	case 0x00000046: return "Enterprise E";
 	case 0x00000047: return "Ultimate E";
-	case 0x00000048: return "Enterprise Eval";
-	case 0x00000054: return "Enterprise N Eval";
+	case 0x00000048: return "Enterprise (Eval)";
+	case 0x0000004F: return "Server Standard (Eval)";
+	case 0x00000050: return "Server Datacenter (Eval)";
+	case 0x00000054: return "Enterprise N (Eval)";
 	case 0x00000057: return "Thin PC";
-	case 0x0000006F: return "Core Connected";
+	case 0x00000058: case 0x00000059: case 0x0000005A: case 0x0000005B: case 0x0000005C: return "Embedded";
+	case 0x00000062: return "Home N";
+	case 0x00000063: return "Home China";
+	case 0x00000064: return "Home Single Language";
+	case 0x00000065: return "Home";
+	case 0x00000067: return "Pro with Media Center";
+	case 0x00000069: case 0x0000006A: case 0x0000006B: case 0x0000006C: return "Embedded";
+	case 0x0000006F: return "Home Connected";
 	case 0x00000070: return "Pro Student";
-	case 0x00000071: return "Core Connected N";
+	case 0x00000071: return "Home Connected N";
 	case 0x00000072: return "Pro Student N";
-	case 0x00000073: return "Core Connected Single Language";
-	case 0x00000074: return "Core Connected China";
-	case 0x00000079: return "Edu";
-	case 0x0000007A: return "Edu N";
-	case 0x0000007D: return "Enterprise S";
-	case 0x0000007E: return "Enterprise S N";
+	case 0x00000073: return "Home Connected Single Language";
+	case 0x00000074: return "Home Connected China";
+	case 0x00000079: return "Education";
+	case 0x0000007A: return "Education N";
+	case 0x0000007D: return "Enterprise LTSB";
+	case 0x0000007E: return "Enterprise LTSB N";
 	case 0x0000007F: return "Pro S";
 	case 0x00000080: return "Pro S N";
-	case 0x00000081: return "Enterprise S Eval";
-	case 0x00000082: return "Enterprise S N Eval";
+	case 0x00000081: return "Enterprise LTSB (Eval)";
+	case 0x00000082: return "Enterprise LTSB N (Eval)";
 	case 0x0000008A: return "Pro Single Language";
 	case 0x0000008B: return "Pro China";
 	case 0x0000008C: return "Enterprise Subscription";
 	case 0x0000008D: return "Enterprise Subscription N";
+	case 0x00000091: return "Server Datacenter SA (Core)";
+	case 0x00000092: return "Server Standard SA (Core)";
 	case 0x00000095: return "Utility VM";
-	case 0x000000A1: return "Pro Workstation";
-	case 0x000000A2: return "Pro Workstation N";
+	case 0x000000A1: return "Pro for Workstations";
+	case 0x000000A2: return "Pro for Workstations N";
 	case 0x000000A4: return "Pro for Education";
 	case 0x000000A5: return "Pro for Education N";
 	case 0x000000AB: return "Enterprise G";	// I swear Microsoft are just making up editions...
 	case 0x000000AC: return "Enterprise G N";
-	case 0x000000B6: return "Core OS";
+	case 0x000000B6: return "Home OS";
 	case 0x000000B7: return "Cloud E";
 	case 0x000000B8: return "Cloud E N";
 	case 0x000000BD: return "Lite";
 	case 0xABCDABCD: return "(Unlicensed)";
-	default: return "(Unknown Edition)";
+	default:
+		static_sprintf(unknown_edition_str, "(Unknown Edition 0x%02X)", (uint32_t)ProductType);
+		return unknown_edition_str;
 	}
 }
 
@@ -316,7 +346,7 @@ static const char* GetEdition(DWORD ProductType)
 void GetWindowsVersion(void)
 {
 	OSVERSIONINFOEXA vi, vi2;
-	DWORD dwProductType;
+	DWORD dwProductType = 0;
 	const char* w = 0;
 	const char* w64 = "32 bit";
 	char *vptr;
@@ -414,7 +444,7 @@ void GetWindowsVersion(void)
 	vptr = &WindowsVersionStr[sizeof("Windows ") - 1];
 	vlen = sizeof(WindowsVersionStr) - sizeof("Windows ") - 1;
 	if (!w)
-		safe_sprintf(vptr, vlen, "%s %u.%u %s", (vi.dwPlatformId==VER_PLATFORM_WIN32_NT?"NT":"??"),
+		safe_sprintf(vptr, vlen, "%s %u.%u %s", (vi.dwPlatformId == VER_PLATFORM_WIN32_NT ? "NT" : "??"),
 			(unsigned)vi.dwMajorVersion, (unsigned)vi.dwMinorVersion, w64);
 	else if (vi.wServicePackMinor)
 		safe_sprintf(vptr, vlen, "%s SP%u.%u %s", w, vi.wServicePackMajor, vi.wServicePackMinor, w64);
@@ -422,7 +452,9 @@ void GetWindowsVersion(void)
 		safe_sprintf(vptr, vlen, "%s SP%u %s", w, vi.wServicePackMajor, w64);
 	else
 		safe_sprintf(vptr, vlen, "%s%s%s, %s",
-			w, (dwProductType != PRODUCT_UNDEFINED) ? " " : "", GetEdition(dwProductType), w64);
+			w, (dwProductType != 0) ? " " : "", GetEdition(dwProductType), w64);
+
+	nWindowsEdition = (int)dwProductType;
 
 	// Add the build number (including UBR if available) for Windows 8.0 and later
 	nWindowsBuildNumber = vi.dwBuildNumber;
@@ -996,4 +1028,88 @@ char* GetCurrentMUI(void)
 		static_strcpy(mui_str, "en-US");
 	}
 	return mui_str;
+}
+
+/*
+ * From: https://stackoverflow.com/a/40390858/1069307
+ */
+BOOL SetPrivilege(HANDLE hToken, LPCWSTR pwzPrivilegeName, BOOL bEnable)
+{
+	TOKEN_PRIVILEGES tp;
+	LUID luid;
+
+	if (!LookupPrivilegeValue(NULL, pwzPrivilegeName, &luid)) {
+		uprintf("Could not lookup '%S' privilege: %s", pwzPrivilegeName, WindowsErrorString());
+		return FALSE;
+	}
+
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = luid;
+	tp.Privileges[0].Attributes = bEnable ? SE_PRIVILEGE_ENABLED : 0;
+
+	if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL)) {
+		uprintf("Could not %s '%S' privilege: %s",
+			bEnable ? "enable" : "disable", pwzPrivilegeName, WindowsErrorString());
+		return FALSE;
+	}
+
+	if (GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
+		uprintf("Error assigning privileges: %s", WindowsErrorString());
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+/*
+ * Mount an offline registry hive located at <pszHivePath> into <key>\<pszHiveName>.
+ * <key> should be HKEY_LOCAL_MACHINE or HKEY_USERS.
+ */
+BOOL MountRegistryHive(const HKEY key, const char* pszHiveName, const char* pszHivePath)
+{
+	LSTATUS status;
+	HANDLE token = INVALID_HANDLE_VALUE;
+
+	assert((key == HKEY_LOCAL_MACHINE) || (key == HKEY_USERS));
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token)) {
+		uprintf("Could not get current process token: %s", WindowsErrorString());
+		return FALSE;
+	}
+
+	// Ignore errors on those in case we can proceed without...
+	SetPrivilege(token, SE_RESTORE_NAME, TRUE);
+	SetPrivilege(token, SE_BACKUP_NAME, TRUE);
+
+	status = RegLoadKeyA(key, pszHiveName, pszHivePath);
+	if (status != ERROR_SUCCESS) {
+		SetLastError(status);
+		uprintf("Could not mount offline registry hive '%s': %s", pszHivePath, WindowsErrorString());
+	} else
+		uprintf("Mounted offline registry hive '%s' to '%s\\%s'",
+			pszHivePath, (key == HKEY_LOCAL_MACHINE) ? "HKLM" : "HKCU", pszHiveName);
+
+	safe_closehandle(token);
+	return (status == ERROR_SUCCESS);
+}
+
+/*
+ * Unmount an offline registry hive.
+ * <key> should be HKEY_LOCAL_MACHINE or HKEY_USERS.
+ */
+BOOL UnmountRegistryHive(const HKEY key, const char* pszHiveName)
+{
+	LSTATUS status;
+
+	assert((key == HKEY_LOCAL_MACHINE) || (key == HKEY_USERS));
+
+	status = RegUnLoadKeyA(key, pszHiveName);
+	if (status != ERROR_SUCCESS) {
+		SetLastError(status);
+		uprintf("Could not unmount offline registry hive: %s", WindowsErrorString());
+	} else
+		uprintf("Unmounted offline registry hive '%s\\%s'",
+			(key == HKEY_LOCAL_MACHINE) ? "HKLM" : "HKCU", pszHiveName);
+
+	return (status == ERROR_SUCCESS);
 }

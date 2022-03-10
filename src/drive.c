@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Drive access function calls
- * Copyright © 2011-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2022 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,8 +29,8 @@
 #include <assert.h>
 #if !defined(__MINGW32__)
 #include <initguid.h>
-#endif
 #include <vds.h>
+#endif
 
 #include "rufus.h"
 #include "missing.h"
@@ -72,7 +72,7 @@ PF_TYPE_DECL(NTAPI, NTSTATUS, NtQueryVolumeInformationFile, (HANDLE, PIO_STATUS_
  * Globals
  */
 RUFUS_DRIVE_INFO SelectedDrive;
-extern BOOL installed_uefi_ntfs, write_as_esp;
+extern BOOL write_as_esp;
 extern int nWindowsVersion, nWindowsBuildNumber;
 uint64_t partition_offset[PI_MAX];
 uint64_t persistence_size = 0;
@@ -360,7 +360,7 @@ char* GetLogicalName(DWORD DriveIndex, uint64_t PartitionOffset, BOOL bKeepTrail
 	if (i < found_name.Index) {
 		ret = safe_strdup(found_name.String[i]);
 	} else {
-		// NB: We need to re-add DRIVE_INDEX_MIN for this call since CheckDriveIndex() substracted it
+		// NB: We need to re-add DRIVE_INDEX_MIN for this call since CheckDriveIndex() subtracted it
 		ret = AltGetLogicalName(DriveIndex + DRIVE_INDEX_MIN, PartitionOffset, bKeepTrailingBackslash, bSilent);
 		if ((ret != NULL) && (strchr(ret, ' ') != NULL))
 			uprintf("Warning: Using physical device to access partition data");
@@ -441,6 +441,46 @@ out:
 static const char* VdsErrorString(HRESULT hr) {
 	SetLastError(hr);
 	return WindowsErrorString();
+}
+
+/*
+ * Per https://docs.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cocreateinstance
+ * and even though we aren't a UWP app, Windows Store prevents the ability to use of VDS when the
+ * Store version of Rufus is running (the call to IVdsServiceLoader_LoadService() will return
+ * E_ACCESSDENIED).
+ */
+BOOL IsVdsAvailable(BOOL bSilent)
+{
+	HRESULT hr = S_FALSE;
+	IVdsService* pService = NULL;
+	IVdsServiceLoader* pLoader = NULL;
+
+	// Initialize COM
+	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
+	IGNORE_RETVAL(CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_CONNECT,
+		RPC_C_IMP_LEVEL_IMPERSONATE, NULL, 0, NULL));
+
+	// Create a VDS Loader Instance
+	hr = CoCreateInstance(&CLSID_VdsLoader, NULL, CLSCTX_LOCAL_SERVER | CLSCTX_REMOTE_SERVER,
+		&IID_IVdsServiceLoader, (void**)&pLoader);
+	if (hr != S_OK) {
+		suprintf("Notice: Disabling VDS (Could not create VDS Loader Instance: %s)", VdsErrorString(hr));
+		goto out;
+	}
+
+	hr = IVdsServiceLoader_LoadService(pLoader, L"", &pService);
+	if (hr != S_OK) {
+		suprintf("Notice: Disabling VDS (Could not load VDS Service: %s)", VdsErrorString(hr));
+		goto out;
+	}
+
+out:
+	if (pService != NULL)
+		IVdsService_Release(pService);
+	if (pLoader != NULL)
+		IVdsServiceLoader_Release(pLoader);
+	VDS_SET_ERROR(hr);
+	return (hr == S_OK);
 }
 
 /*
@@ -789,7 +829,7 @@ BOOL DeletePartition(DWORD DriveIndex, ULONGLONG PartitionOffset, BOOL bSilent)
 }
 
 /*
- * Count on Microsoft for *COMPLETELY CRIPPLING* an API when alledgedly upgrading it...
+ * Count on Microsoft for *COMPLETELY CRIPPLING* an API when allegedly upgrading it...
  * As illustrated when you do so with diskpart (which uses VDS behind the scenes), VDS
  * simply *DOES NOT* list all the volumes that the system can see, especially compared
  * to what mountvol (which uses FindFirstVolume()/FindNextVolume()) and other APIs do.
@@ -994,6 +1034,22 @@ HANDLE GetLogicalHandle(DWORD DriveIndex, uint64_t PartitionOffset, BOOL bLockDr
 	return hLogical;
 }
 
+/* Alternate version of the above, for ESPs */
+HANDLE AltGetLogicalHandle(DWORD DriveIndex, uint64_t PartitionOffset, BOOL bLockDrive, BOOL bWriteAccess, BOOL bWriteShare)
+{
+	HANDLE hLogical = INVALID_HANDLE_VALUE;
+	char* LogicalPath = AltGetLogicalName(DriveIndex, PartitionOffset, FALSE, FALSE);
+
+	if (LogicalPath == NULL) {
+		uprintf("No logical drive found");
+		return NULL;
+	}
+
+	hLogical = GetHandle(LogicalPath, bLockDrive, bWriteAccess, bWriteShare);
+	free(LogicalPath);
+	return hLogical;
+}
+
 /*
  * Who would have thought that Microsoft would make it so unbelievably hard to
  * get the frickin' device number for a drive? You have to use TWO different
@@ -1086,11 +1142,11 @@ static BOOL _GetDriveLettersAndType(DWORD DriveIndex, char* drive_letters, UINT*
 		if ((_drive_type != DRIVE_REMOVABLE) && (_drive_type != DRIVE_FIXED))
 			continue;
 
-		static_sprintf(logical_drive, "\\\\.\\%c:", drive[0]);
+		static_sprintf(logical_drive, "\\\\.\\%c:", toupper(drive[0]));
 		hDrive = CreateFileA(logical_drive, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE,
 			NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (hDrive == INVALID_HANDLE_VALUE) {
-//			uprintf("Warning: could not open drive %c: %s", drive[0], WindowsErrorString());
+//			uprintf("Warning: could not open drive %c: %s", toupper(drive[0]), WindowsErrorString());
 			continue;
 		}
 
@@ -1285,11 +1341,11 @@ BOOL GetDriveLabel(DWORD DriveIndex, char* letters, char** label)
 	if (DeviceIoControl(hPhysical, IOCTL_STORAGE_CHECK_VERIFY, NULL, 0, NULL, 0, &size, NULL))
 		AutorunLabel = get_token_data_file("label", AutorunPath);
 	else if (GetLastError() == ERROR_NOT_READY)
-		uprintf("Ignoring autorun.inf label for drive %c: %s", letters[0],
+		uprintf("Ignoring 'autorun.inf' label for drive %c: %s", toupper(letters[0]),
 		(HRESULT_CODE(GetLastError()) == ERROR_NOT_READY)?"No media":WindowsErrorString());
 	safe_closehandle(hPhysical);
 	if (AutorunLabel != NULL) {
-		uprintf("Using autorun.inf label for drive %c: '%s'", letters[0], AutorunLabel);
+		uprintf("Using 'autorun.inf' label for drive %c: '%s'", toupper(letters[0]), AutorunLabel);
 		static_strcpy(VolumeLabel, AutorunLabel);
 		safe_free(AutorunLabel);
 		*label = VolumeLabel;
@@ -1569,7 +1625,7 @@ BOOL ToggleEsp(DWORD DriveIndex, uint64_t PartitionOffset)
 			// We successfully reverted ESP from Basic Data -> Delete stored ESP info
 			ClearEspInfo((uint8_t)j);
 		} else if (!IsDriveLetterInUse(*mount_point)) {
-			// We succesfully switched ESP to Basic Data -> Try to mount it
+			// We successfully switched ESP to Basic Data -> Try to mount it
 			volume_name = GetLogicalName(DriveIndex, DriveLayout->PartitionEntry[i].StartingOffset.QuadPart, TRUE, FALSE);
 			IGNORE_RETVAL(MountVolume(mount_point, volume_name));
 			free(volume_name);
@@ -1579,6 +1635,133 @@ BOOL ToggleEsp(DWORD DriveIndex, uint64_t PartitionOffset)
 
 out:
 	safe_closehandle(hPhysical);
+	return ret;
+}
+
+// This is a crude attempt at detecting file systems through their superblock magic.
+// Note that we only attempt to detect the file systems that Rufus can format as
+// well as a couple other maintsream ones.
+const char* GetFsName(HANDLE hPhysical, LARGE_INTEGER StartingOffset)
+{
+	typedef struct {
+		const char* name;
+		const uint8_t magic[8];
+	} win_fs_type;
+	const win_fs_type win_fs_types[] = {
+		{ "exFAT", { 'E', 'X', 'F', 'A', 'T', ' ', ' ', ' ' } },
+		{ "NTFS", { 'N', 'T', 'F', 'S', ' ', ' ', ' ', ' ' } },
+		{ "ReFS", { 'R', 'e', 'F', 'S', 0, 0, 0, 0 } }
+	};
+	const  win_fs_type fat_fs_types[] = {
+		{ "FAT", {  'F', 'A', 'T', ' ', ' ', ' ', ' ', ' ' } },
+		{ "FAT12", {  'F', 'A', 'T', '1', '2', ' ', ' ', ' ' } },
+		{ "FAT16", {  'F', 'A', 'T', '1', '6', ' ', ' ', ' ' } },
+		{ "FAT32", {  'F', 'A', 'T', '3', '2', ' ', ' ', ' ' } },
+	};
+	const uint32_t ext_feature[3][3] = {
+		// feature_compat
+		{ 0x0000017B, 0x00000004, 0x00000E00 },
+		// feature_ro_compat
+		{ 0x00000003, 0x00000000, 0x00008FF8 },
+		// feature_incompat
+		{ 0x00000013, 0x0000004C, 0x0003F780 }
+	};
+	const char* ext_names[] = { "ext", "ext2", "ext3", "ext4" };
+	const char* ret = "(Unrecognized)";
+	DWORD i, j, offset, size, sector_size = 512;
+	uint8_t* buf = calloc(sector_size, 1);
+	if (buf == NULL)
+		goto out;
+
+	// 1. Try to detect FAT/exFAT/NTFS/ReFS through the 512 bytes superblock at offset 0
+	if (!SetFilePointerEx(hPhysical, StartingOffset, NULL, FILE_BEGIN))
+		goto out;
+	if (!ReadFile(hPhysical, buf, sector_size, &size, NULL) || size != sector_size)
+		goto out;
+
+
+	// The beginning of a superblock for FAT/exFAT/NTFS/ReFS is pretty much always the same:
+	// There are 3 bytes potentially used for a jump instruction, and then are 8 bytes of
+	// OEM Name which, even if *not* technically correct, we are going to assume hold an
+	// immutable file system magic for exFAT/NTFS/ReFS (but not for FAT, see below).
+	for (i = 0; i < ARRAYSIZE(win_fs_types); i++)
+		if (memcmp(&buf[0x03], win_fs_types[i].magic, 8) == 0)
+			break;
+	if (i < ARRAYSIZE(win_fs_types)) {
+		ret = win_fs_types[i].name;
+		goto out;
+	}
+
+	// For FAT, because the OEM Name may actually be set to something else than what we
+	// expect, we poke the FAT12/16 Extended BIOS Parameter Block:
+	// https://en.wikipedia.org/wiki/Design_of_the_FAT_file_system#Extended_BIOS_Parameter_Block
+	// or FAT32 Extended BIOS Parameter Block:
+	// https://en.wikipedia.org/wiki/Design_of_the_FAT_file_system#FAT32_Extended_BIOS_Parameter_Block
+	for (offset = 0x36; offset <= 0x52; offset += 0x1C) {
+		for (i = 0; i < ARRAYSIZE(fat_fs_types); i++)
+			if (memcmp(&buf[offset], fat_fs_types[i].magic, 8) == 0)
+				break;
+		if (i < ARRAYSIZE(fat_fs_types)) {
+			ret = fat_fs_types[i].name;
+			goto out;
+		}
+	}
+
+	// 2. Try to detect Apple AFS/HFS/HFS+ through the 512 bytes superblock at either offset 0 or 1024
+	// "NXSB" at offset 0x20 => APFS
+	if (strncmp("NXSB", &buf[0x20], 4) == 0) {
+		ret = "APFS";
+		goto out;
+	}
+	// Switch to offset 1024
+	memset(buf, 0, sector_size);
+	StartingOffset.QuadPart += 0x0400ULL;
+	if (!SetFilePointerEx(hPhysical, StartingOffset, NULL, FILE_BEGIN))
+		goto out;
+	if (!ReadFile(hPhysical, buf, sector_size, &size, NULL) || size != sector_size)
+		goto out;
+	// "HX" or "H+" at offset 0x00 => HFS/HFS+
+	if (buf[0] == 'H' && (buf[1] == 'X' || buf[1] == '+')) {
+		ret = "HFS/HFS+";
+		goto out;
+	}
+
+	// 3. Try to detect ext2/ext3/ext4 through the 512 bytes superblock at offset 1024
+	// We're already at the right offset
+	if (!SetFilePointerEx(hPhysical, StartingOffset, NULL, FILE_BEGIN))
+		goto out;
+	if (!ReadFile(hPhysical, buf, sector_size, &size, NULL) || size != sector_size)
+		goto out;
+	if (buf[0x38] == 0x53 && buf[0x39] == 0xEF) {
+		uint32_t rev = 0;
+		for (i = 0; i < 3; i++) {
+			uint32_t feature = *((uint32_t*)&buf[0x5C + 4 * i]);
+			for (j = 0; j < 3; j++) {
+				if (feature & ext_feature[i][j] && rev <= j)
+					rev = j + 1;
+			}
+		}
+		assert(rev < ARRAYSIZE(ext_names));
+		ret = ext_names[rev];
+		goto out;
+	}
+
+	// 4. Try to detect UDF through by looking for a "BEA01\0" string at offset 0xC001
+	// NB: This is not thorough UDF detection but good enough for our purpose.
+	// For the full specs see: http://www.osta.org/specs/pdf/udf260.pdf
+	memset(buf, 0, sector_size);
+	StartingOffset.QuadPart += 0x8000ULL - 0x0400ULL;
+	if (!SetFilePointerEx(hPhysical, StartingOffset, NULL, FILE_BEGIN))
+		goto out;
+	if (!ReadFile(hPhysical, buf, sector_size, &size, NULL) || size != sector_size)
+		goto out;
+	if (strncmp("BEA01", &buf[1], 5) == 0) {
+		ret = "UDF";
+		goto out;
+	}
+
+out:
+	free(buf);
 	return ret;
 }
 
@@ -1698,9 +1881,11 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 					SelectedDrive.PartitionOffset[i] = DriveLayout->PartitionEntry[i].StartingOffset.QuadPart;
 					SelectedDrive.PartitionSize[i] = DriveLayout->PartitionEntry[i].PartitionLength.QuadPart;
 				}
-				suprintf("  Type: %s (0x%02x)\r\n  Size: %s (%lld bytes)\r\n  Start Sector: %lld, Boot: %s",
+				suprintf("  Type: %s (0x%02x)\r\n  Detected File System: %s\r\n"
+					"  Size: %s (%lld bytes)\r\n  Start Sector: %lld, Boot: %s",
 					((part_type == 0x07 || super_floppy_disk) && (FileSystemName[0] != 0)) ?
 					FileSystemName : GetMBRPartitionType(part_type), super_floppy_disk ? 0: part_type,
+					GetFsName(hPhysical, DriveLayout->PartitionEntry[i].StartingOffset),
 					SizeToHumanReadable(DriveLayout->PartitionEntry[i].PartitionLength.QuadPart, TRUE, FALSE),
 					DriveLayout->PartitionEntry[i].PartitionLength.QuadPart,
 					DriveLayout->PartitionEntry[i].StartingOffset.QuadPart / SelectedDrive.SectorSize,
@@ -1733,6 +1918,7 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 				GetGPTPartitionType(&DriveLayout->PartitionEntry[i].Gpt.PartitionType));
 			if (DriveLayout->PartitionEntry[i].Gpt.Name[0] != 0)
 				suprintf("  Name: '%S'", DriveLayout->PartitionEntry[i].Gpt.Name);
+			suprintf("  Detected File System: %s", GetFsName(hPhysical, DriveLayout->PartitionEntry[i].StartingOffset));
 			suprintf("  ID: %s\r\n  Size: %s (%" PRIi64 " bytes)\r\n  Start Sector: %" PRIi64 ", Attributes: 0x%016" PRIX64,
 				GuidToString(&DriveLayout->PartitionEntry[i].Gpt.PartitionId),
 				SizeToHumanReadable(DriveLayout->PartitionEntry[i].PartitionLength.QuadPart, TRUE, FALSE),
@@ -1776,12 +1962,12 @@ static BOOL FlushDrive(char drive_letter)
 	hDrive = CreateFileA(logical_drive, GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE,
 		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (hDrive == INVALID_HANDLE_VALUE) {
-		uprintf("Failed to open %c: for flushing: %s", drive_letter, WindowsErrorString());
+		uprintf("Failed to open %c: for flushing: %s", toupper(drive_letter), WindowsErrorString());
 		goto out;
 	}
 	r = FlushFileBuffers(hDrive);
 	if (r == FALSE)
-		uprintf("Failed to flush %c: %s", drive_letter, WindowsErrorString());
+		uprintf("Failed to flush %c: %s", toupper(drive_letter), WindowsErrorString());
 
 out:
 	safe_closehandle(hDrive);
@@ -1830,10 +2016,10 @@ BOOL MountVolume(char* drive_name, char *volume_name)
 		// about the level of thought and foresight that actually goes into the Windows APIs...
 		// [1] https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-definedosdevicew
 		if (!DefineDosDeviceA(DDD_RAW_TARGET_PATH | DDD_NO_BROADCAST_SYSTEM, dos_name, &volume_name[14])) {
-			uprintf("Could not mount %s as %C:", volume_name, drive_name[0]);
+			uprintf("Could not mount %s as %c:", volume_name, toupper(drive_name[0]));
 			return FALSE;
 		}
-		uprintf("%s was successfully mounted as %C:", volume_name, drive_name[0]);
+		uprintf("%s was successfully mounted as %c:", volume_name, toupper(drive_name[0]));
 		return TRUE;
 	}
 
@@ -1846,8 +2032,8 @@ BOOL MountVolume(char* drive_name, char *volume_name)
 	// If that is the case, update drive_name to that letter.
 	if ( (GetVolumePathNamesForVolumeNameA(volume_name, mounted_letter, sizeof(mounted_letter), &size))
 	  && (size > 1) && (mounted_letter[0] != drive_name[0]) ) {
-		uprintf("%s is already mounted as %C: instead of %C: - Will now use this target instead...",
-			volume_name, mounted_letter[0], drive_name[0]);
+		uprintf("%s is already mounted as %c: instead of %c: - Will now use this target instead...",
+			volume_name, toupper(mounted_letter[0]), toupper(drive_name[0]));
 		drive_name[0] = mounted_letter[0];
 		return TRUE;
 	}
@@ -1862,7 +2048,7 @@ BOOL MountVolume(char* drive_name, char *volume_name)
 				uprintf("%s is mounted, but volume GUID doesn't match:\r\n  expected %s, got %s",
 					drive_name, volume_name, mounted_guid);
 			} else {
-				duprintf("%s is already mounted as %C:", volume_name, drive_name[0]);
+				duprintf("%s is already mounted as %c:", volume_name, toupper(drive_name[0]));
 				return TRUE;
 			}
 			uprintf("Retrying after dismount...");
@@ -1873,7 +2059,7 @@ BOOL MountVolume(char* drive_name, char *volume_name)
 			if ((GetLastError() == ERROR_DIR_NOT_EMPTY) &&
 				GetVolumeNameForVolumeMountPointA(drive_name, mounted_guid, sizeof(mounted_guid)) &&
 				(safe_strcmp(volume_name, mounted_guid) == 0)) {
-				uprintf("%s was remounted as %C: (second time lucky!)", volume_name, drive_name[0]);
+				uprintf("%s was remounted as %c: (second time lucky!)", volume_name, toupper(drive_name[0]));
 				return TRUE;
 			}
 		}
@@ -1946,9 +2132,9 @@ BOOL RemountVolume(char* drive_name, BOOL bSilent)
 	FlushDrive(drive_name[0]);
 	if (GetVolumeNameForVolumeMountPointA(drive_name, volume_name, sizeof(volume_name))) {
 		if (MountVolume(drive_name, volume_name)) {
-			suprintf("Successfully remounted %s as %C:", volume_name, drive_name[0]);
+			suprintf("Successfully remounted %s as %c:", volume_name, toupper(drive_name[0]));
 		} else {
-			suprintf("Could not remount %s as %C: %s", volume_name, drive_name[0], WindowsErrorString());
+			suprintf("Could not remount %s as %c: %s", volume_name, toupper(drive_name[0]), WindowsErrorString());
 			// This will leave the drive inaccessible and must be flagged as an error
 			FormatStatus = ERROR_SEVERITY_ERROR|FAC(FACILITY_STORAGE)|APPERR(ERROR_CANT_REMOUNT_VOLUME);
 			return FALSE;
@@ -2231,7 +2417,6 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 				uprintf("Write error: %s", WindowsErrorString());
 				return FALSE;
 			}
-			installed_uefi_ntfs = TRUE;
 		}
 		pn++;
 	}

@@ -720,6 +720,32 @@ static __inline DWORD GetModuleFileNameExU(HANDLE hProcess, HMODULE hModule, cha
 	return ret;
 }
 
+static __inline DWORD GetFileVersionInfoSizeU(const char* lpFileName, LPDWORD lpdwHandle)
+{
+	DWORD ret = 0, err = ERROR_INVALID_DATA;
+	wconvert(lpFileName);
+	ret = GetFileVersionInfoSizeW(wlpFileName, lpdwHandle);
+	err = GetLastError();
+	wfree(lpFileName);
+	SetLastError(err);
+	return ret;
+}
+
+static __inline BOOL GetFileVersionInfoU(const char* lpFileName, DWORD dwHandle, DWORD dwLen, LPVOID lpData)
+{
+	BOOL ret = FALSE;
+	DWORD err = ERROR_INVALID_DATA;
+	wconvert(lpFileName);
+	if (dwHandle != 0)
+		SetLastError(ERROR_INVALID_PARAMETER);
+	else
+		ret = GetFileVersionInfoW(wlpFileName, dwHandle, dwLen, lpData);
+	err = GetLastError();
+	wfree(lpFileName);
+	SetLastError(err);
+	return ret;
+}
+
 static __inline DWORD GetFullPathNameU(const char* lpFileName, DWORD nBufferLength, char* lpBuffer, char** lpFilePart)
 {
 	DWORD ret = 0, err = ERROR_INVALID_DATA;
@@ -795,7 +821,7 @@ static __inline int SHDeleteDirectoryExU(HWND hwnd, const char* pszPath, FILEOP_
 	int ret;
 	// String needs to be double NULL terminated, so we just use the length of the UTF-8 string
 	// which is always expected to be larger than our UTF-16 one, and add 2 chars for good measure.
-	size_t wpszPath_len = strlen(pszPath) + 2;
+	size_t wpszPath_len = (pszPath == NULL) ? 0 : strlen(pszPath) + 2;
 	// coverity[returned_null]
 	walloc(pszPath, wpszPath_len);
 	SHFILEOPSTRUCTW shfo = { hwnd, FO_DELETE, wpszPath, NULL, fFlags, FALSE, NULL, NULL };

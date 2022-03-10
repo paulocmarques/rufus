@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * UI-related function calls
- * Copyright © 2018-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2018-2022 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -45,6 +45,7 @@
 UINT_PTR UM_LANGUAGE_MENU_MAX = UM_LANGUAGE_MENU;
 HIMAGELIST hUpImageList, hDownImageList;
 extern BOOL use_vds, appstore_version;
+extern int imop_win_sel;
 int update_progress_type = UPT_PERCENT;
 int advanced_device_section_height, advanced_format_section_height;
 // (empty) check box width, (empty) drop down width, button height (for and without dropdown match)
@@ -273,6 +274,8 @@ void GetFullWidth(HWND hDlg)
 	// Go through the Image Options for Windows To Go
 	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_117)).cx);
 	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_118)).cx);
+	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_322)).cx);
+	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_323)).cx);
 
 	// Now deal with full length checkbox lines
 	for (i = 0; i<ARRAYSIZE(full_width_checkboxes); i++)
@@ -572,8 +575,9 @@ void SetSectionHeaders(HWND hDlg)
 		SendDlgItemMessageA(hDlg, section_control_ids[i], WM_SETFONT, (WPARAM)hf, TRUE);
 		hCtrl = GetDlgItem(hDlg, section_control_ids[i]);
 		memset(wtmp, 0, sizeof(wtmp));
-		GetWindowTextW(hCtrl, wtmp, ARRAYSIZE(wtmp) - 3);
+		GetWindowTextW(hCtrl, wtmp, ARRAYSIZE(wtmp) - 4);
 		wlen = wcslen(wtmp);
+		assert(wlen < ARRAYSIZE(wtmp) - 2);
 		wtmp[wlen++] = L' ';
 		wtmp[wlen++] = L' ';
 		SetWindowTextW(hCtrl, wtmp);
@@ -781,16 +785,16 @@ void ToggleImageOptions(void)
 
 	assert(popcnt8(image_options) <= 1);
 
-	// Keep a copy of the "Image Option" text (so that we don't have to duplicate its transation in the .loc)
+	// Keep a copy of the "Image Option" text (so that we don't have to duplicate its translation in the .loc)
 	if (image_option_txt[0] == 0)
 		GetWindowTextU(GetDlgItem(hMainDialog, IDS_IMAGE_OPTION_TXT), image_option_txt, sizeof(image_option_txt));
 
-	if ( ((has_wintogo) && !(image_options & IMOP_WINTOGO)) ||
-		 ((!has_wintogo) && (image_options & IMOP_WINTOGO)) ) {
+	if (((has_wintogo) && !(image_options & IMOP_WINTOGO)) ||
+		((!has_wintogo) && (image_options & IMOP_WINTOGO))) {
 		image_options ^= IMOP_WINTOGO;
 		if (image_options & IMOP_WINTOGO) {
 			// Set the Windows To Go selection in the dropdown
-			IGNORE_RETVAL(ComboBox_SetCurSel(hImageOption, (img_report.is_windows_img || !windows_to_go_selected) ? 0 : 1));
+			IGNORE_RETVAL(ComboBox_SetCurSel(hImageOption, imop_win_sel));
 		}
 	}
 
@@ -1066,7 +1070,7 @@ void CreateAdditionalControls(HWND hDlg)
 	hAdvancedDeviceToolbar = CreateWindowEx(0, TOOLBARCLASSNAME, NULL, TOOLBAR_STYLE,
 		0, 0, 0, 0, hMainDialog, (HMENU)IDC_ADVANCED_DEVICE_TOOLBAR, hMainInstance, NULL);
 	SendMessage(hAdvancedDeviceToolbar, CCM_SETVERSION, (WPARAM)6, 0);
-	memset(tbToolbarButtons, 0, sizeof(TBBUTTON));
+	memset(tbToolbarButtons, 0, sizeof(tbToolbarButtons));
 	tbToolbarButtons[0].idCommand = IDC_ADVANCED_DRIVE_PROPERTIES;
 	tbToolbarButtons[0].fsStyle = BTNS_SHOWTEXT | BTNS_AUTOSIZE;
 	tbToolbarButtons[0].fsState = TBSTATE_ENABLED;
@@ -1088,7 +1092,7 @@ void CreateAdditionalControls(HWND hDlg)
 	hAdvancedFormatToolbar = CreateWindowEx(0, TOOLBARCLASSNAME, NULL, TOOLBAR_STYLE,
 		0, 0, 0, 0, hMainDialog, (HMENU)IDC_ADVANCED_FORMAT_TOOLBAR, hMainInstance, NULL);
 	SendMessage(hAdvancedFormatToolbar, CCM_SETVERSION, (WPARAM)6, 0);
-	memset(tbToolbarButtons, 0, sizeof(TBBUTTON));
+	memset(tbToolbarButtons, 0, sizeof(tbToolbarButtons));
 	tbToolbarButtons[0].idCommand = IDC_ADVANCED_FORMAT_OPTIONS;
 	tbToolbarButtons[0].fsStyle = BTNS_SHOWTEXT | BTNS_AUTOSIZE;
 	tbToolbarButtons[0].fsState = TBSTATE_ENABLED;
@@ -1178,6 +1182,8 @@ void InitProgress(BOOL bOnlyFormat)
 				break;
 			case BT_IMAGE:
 				nb_slots[OP_FILE_COPY] = (img_report.is_iso || img_report.is_windows_img) ? -1 : 0;
+				if (HAS_WINDOWS(img_report) && ComboBox_GetCurItemData(hImageOption) == IMOP_WIN_EXTENDED)
+					nb_slots[OP_PATCH] = -1;
 				break;
 			default:
 				nb_slots[OP_FILE_COPY] = 2 + 1;
@@ -1384,7 +1390,7 @@ static void bar_update(struct bar_progress* bp, uint64_t howmuch, uint64_t dltim
 // display percentage completed, rate of transfer and estimated remaining duration.
 // During init (op = OP_INIT) an optional HWND can be passed on which to look for
 // a progress bar. Part of the code (eta, speed) comes from GNU wget.
-void UpdateProgressWithInfo(int op, int msg, uint64_t processed, uint64_t total)
+void _UpdateProgressWithInfo(int op, int msg, uint64_t processed, uint64_t total, BOOL force)
 {
 	static int last_update_progress_type = UPT_PERCENT;
 	static struct bar_progress bp = { 0 };
@@ -1483,7 +1489,7 @@ void UpdateProgressWithInfo(int op, int msg, uint64_t processed, uint64_t total)
 			static_sprintf(msg_data, "%0.1f%%", percent);
 			break;
 		}
-		if ((bp.count == bp.total_length) || (current_time > last_refresh + MAX_REFRESH)) {
+		if ((force) || (bp.count == bp.total_length) || (current_time > last_refresh + MAX_REFRESH)) {
 			if (op < 0) {
 				SendMessage(hProgressBar, PBM_SETPOS, (WPARAM)(MAX_PROGRESS * percent / 100.0f), 0);
 				if (op == OP_NOOP_WITH_TASKBAR)
@@ -1491,8 +1497,8 @@ void UpdateProgressWithInfo(int op, int msg, uint64_t processed, uint64_t total)
 			} else {
 				UpdateProgress(op, (float)percent);
 			}
-			if ((msg >= 0) && ((current_time > bp.last_screen_update + SCREEN_REFRESH_INTERVAL) ||
-				(last_update_progress_type != update_progress_type) || (bp.count == bp.total_length))) {
+			if ((force) || ((msg >= 0) && ((current_time > bp.last_screen_update + SCREEN_REFRESH_INTERVAL) ||
+				(last_update_progress_type != update_progress_type) || (bp.count == bp.total_length)))) {
 				PrintInfo(0, msg, msg_data);
 				bp.last_screen_update = current_time;
 			}

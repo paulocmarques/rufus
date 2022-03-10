@@ -102,6 +102,7 @@ static const char* wininst_name[] = { "install.wim", "install.esd", "install.swm
 // If the disc was mastered properly, GRUB/EFI will take care of itself
 static const char* grub_dirname = "/boot/grub/i386-pc";
 static const char* grub_cfg[] = { "grub.cfg", "loopback.cfg" };
+static const char* compatresources_dll = "compatresources.dll";
 static const char* menu_cfg = "menu.cfg";
 // NB: Do not alter the order of the array below without validating hardcoded indexes in check_iso_props
 static const char* syslinux_cfg[] = { "isolinux.cfg", "syslinux.cfg", "extlinux.conf", "txt.cfg" };
@@ -179,7 +180,7 @@ static BOOL check_iso_props(const char* psz_dirname, int64_t file_length, const 
 
 	// Check for archiso loader/entries/*.conf files
 	if (safe_stricmp(psz_dirname, "/loader/entries") == 0) {
-		len = strlen(psz_basename);
+		len = safe_strlen(psz_basename);
 		props->is_conf = ((len > 4) && (stricmp(&psz_basename[len - 5], ".conf") == 0));
 	}
 
@@ -266,17 +267,22 @@ static BOOL check_iso_props(const char* psz_dirname, int64_t file_length, const 
 					img_report.has_efi |= (2 << i);	// start at 2 since "bootmgr.efi" is bit 0
 		}
 
-		// Check for "install.###" in "###/sources/"
 		if (psz_dirname != NULL) {
-			if (safe_stricmp(&psz_dirname[max(0, ((int)safe_strlen(psz_dirname)) - ((int)strlen(sources_str)))], sources_str) == 0) {
+			if (safe_stricmp(&psz_dirname[max(0, ((int)safe_strlen(psz_dirname)) -
+				((int)strlen(sources_str)))], sources_str) == 0) {
+				// Check for "install.###" in "###/sources/"
 				for (i = 0; i < ARRAYSIZE(wininst_name); i++) {
 					if (safe_stricmp(psz_basename, wininst_name[i]) == 0) {
 						if (img_report.wininst_index < MAX_WININST) {
-							static_sprintf(img_report.wininst_path[img_report.wininst_index], "?:%s", psz_fullpath);
+							static_sprintf(img_report.wininst_path[img_report.wininst_index],
+								"?:%s", psz_fullpath);
 							img_report.wininst_index++;
 						}
 					}
 				}
+				// Check for "compatresources.dll" in "###/sources/"
+				if (safe_stricmp(psz_basename, compatresources_dll) == 0)
+					img_report.has_compatresources_dll = TRUE;
 			}
 		}
 
@@ -370,6 +376,16 @@ static void fix_config(const char* psz_fullpath, const char* psz_path, const cha
 			} else if (replace_in_token_data(src, (props->is_conf) ? "options" : "append",
 				iso_label, usb_label, TRUE) != NULL) {
 				uprintf("  Patched %s: '%s' ➔ '%s'\n", src, iso_label, usb_label);
+				modified = TRUE;
+			}
+			//
+			// Since version 8.2, and https://github.com/rhinstaller/anaconda/commit/a7661019546ec1d8b0935f9cb0f151015f2e1d95,
+			// Red Hat derivatives have changed their CD-ROM detection policy which leads to the installation source
+			// not being found. So we need to use 'inst.repo' instead of 'inst.stage2' in the kernel options.
+			//
+			if (img_report.rh8_derivative && (replace_in_token_data(src, props->is_grub_cfg ?
+				"linuxefi" : "append", "inst.stage2", "inst.repo", TRUE) != NULL)) {
+				uprintf("  Patched %s: '%s' ➔ '%s'\n", src, "inst.stage2", "inst.repo");
 				modified = TRUE;
 			}
 		}
@@ -842,12 +858,18 @@ void GetGrubVersion(char* buf, size_t buf_size)
 		img_report.grub2_version[0] = 0;
 }
 
+// Linking to version.lib would result in DLL sideloading issues, so we don't
+// See https://github.com/pbatard/rufus/pull/1838
+PF_TYPE_DECL(WINAPI, DWORD, GetFileVersionInfoSizeW, (LPCWSTR, LPDWORD));
+PF_TYPE_DECL(WINAPI, BOOL, GetFileVersionInfoW, (LPCWSTR, DWORD, DWORD, LPVOID));
+PF_TYPE_DECL(WINAPI, BOOL, VerQueryValueA, (LPCVOID, LPCSTR, LPVOID, PUINT));
+
 BOOL ExtractISO(const char* src_iso, const char* dest_dir, BOOL scan)
 {
 	size_t i, j, size, sl_index = 0;
 	uint16_t sl_version;
 	FILE* fd;
-	int r = 1;
+	int k, r = 1;
 	iso9660_t* p_iso = NULL;
 	iso9660_pvd_t pvd;
 	udf_t* p_udf = NULL;
@@ -861,6 +883,10 @@ BOOL ExtractISO(const char* src_iso, const char* dest_dir, BOOL scan)
 
 	if ((!enable_iso) || (src_iso == NULL) || (dest_dir == NULL))
 		return FALSE;
+
+	PF_INIT_OR_OUT(GetFileVersionInfoSizeW, Version);
+	PF_INIT_OR_OUT(GetFileVersionInfoW, Version);
+	PF_INIT_OR_OUT(VerQueryValueA, Version);
 
 	scan_only = scan;
 	if (!scan_only)
@@ -953,8 +979,8 @@ out:
 		if ((iso9660_ifs_read_pvd(p_iso, &pvd)) && (_stat64U(src_iso, &stat) == 0))
 			img_report.mismatch_size = (int64_t)(iso9660_get_pvd_space_size(&pvd)) * ISO_BLOCKSIZE - stat.st_size;
 		// Remove trailing spaces from the label
-		for (j=safe_strlen(img_report.label)-1; ((j>0)&&(isspaceU(img_report.label[j]))); j--)
-			img_report.label[j] = 0;
+		for (k=(int)safe_strlen(img_report.label)-1; ((k>0)&&(isspaceU(img_report.label[k]))); k--)
+			img_report.label[k] = 0;
 		// We use the fact that UDF_BLOCKSIZE and ISO_BLOCKSIZE are the same here
 		img_report.projected_size = total_blocks * ISO_BLOCKSIZE;
 		// We will link the existing isolinux.cfg from a syslinux.cfg we create
@@ -1088,6 +1114,41 @@ out:
 			else {
 				uprintf("  Could not detect Grub version");
 				img_report.has_grub2 = FALSE;
+			}
+		}
+		if (img_report.has_compatresources_dll) {
+			// So that we don't have to extract the XML index from boot/install.wim
+			// to find if we're dealing with Windows 11, we isolate the version from
+			// sources/compatresources.dll, which is much faster...
+			VS_FIXEDFILEINFO* ver_info = NULL;
+			DWORD ver_handle = 0, ver_size;
+			UINT value_len = 0;
+			assert(pfGetFileVersionInfoSizeW != NULL);
+			assert(pfGetFileVersionInfoW != NULL);
+			assert(pfVerQueryValueA != NULL);
+			// coverity[swapped_arguments]
+			if (GetTempFileNameU(temp_dir, APPLICATION_NAME, 0, path) != 0) {
+				wconvert(path);
+				assert(wpath != NULL);
+				size = (size_t)ExtractISOFile(src_iso, "sources/compatresources.dll", path, FILE_ATTRIBUTE_NORMAL);
+				ver_size = pfGetFileVersionInfoSizeW(wpath, &ver_handle);
+				if (ver_size != 0) {
+					buf = malloc(ver_size);
+					if ((buf != NULL) && pfGetFileVersionInfoW(wpath, ver_handle, ver_size, buf) &&
+						pfVerQueryValueA(buf, "\\", (LPVOID)&ver_info, &value_len) && (value_len != 0)) {
+						if (ver_info->dwSignature == VS_FFI_SIGNATURE) {
+							img_report.win_version.major = HIWORD(ver_info->dwFileVersionMS);
+							img_report.win_version.minor = LOWORD(ver_info->dwFileVersionMS);
+							img_report.win_version.build = HIWORD(ver_info->dwFileVersionLS);
+							img_report.win_version.revision = LOWORD(ver_info->dwFileVersionLS);
+							if ((img_report.win_version.major == 10) && (img_report.win_version.build > 20000))
+								img_report.win_version.major = 11;
+						}
+					}
+					free(buf);
+				}
+				DeleteFileW(wpath);
+				free(wpath);
 			}
 		}
 		StrArrayDestroy(&config_path);
@@ -1392,7 +1453,7 @@ BOOL HasEfiImgBootLoaders(void)
 	p_private->p_iso = p_iso;
 	p_private->lsn = p_statbuf->lsn;
 	p_private->sec_start = 0;
-	// Populate our intial buffer
+	// Populate our initial buffer
 	if (iso9660_iso_seek_read(p_private->p_iso, p_private->buf, p_private->lsn, ISO_NB_BLOCKS) != ISO_NB_BLOCKS * ISO_BLOCKSIZE) {
 		uprintf("Error reading ISO-9660 file %s at LSN %lu\n", img_report.efi_img_path, (long unsigned int)p_private->lsn);
 		goto out;
@@ -1483,7 +1544,7 @@ BOOL DumpFatDir(const char* path, int32_t cluster)
 		p_private->p_iso = p_iso;
 		p_private->lsn = p_statbuf->lsn;
 		p_private->sec_start = 0;
-		// Populate our intial buffer
+		// Populate our initial buffer
 		if (iso9660_iso_seek_read(p_private->p_iso, p_private->buf, p_private->lsn, ISO_NB_BLOCKS) != ISO_NB_BLOCKS * ISO_BLOCKSIZE) {
 			uprintf("Error reading ISO-9660 file %s at LSN %lu\n", img_report.efi_img_path, (long unsigned int)p_private->lsn);
 			goto out;
@@ -1496,6 +1557,7 @@ BOOL DumpFatDir(const char* path, int32_t cluster)
 	}
 
 	do {
+		// coverity[-taint_source]
 		dirpos.cluster = libfat_dumpdir(lf_fs, &dirpos, &diritem);
 		if (dirpos.cluster >= 0) {
 			name = wchar_to_utf8(diritem.name);

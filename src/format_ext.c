@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * extfs formatting
- * Copyright © 2019-2020 Pete Batard <pete@akeo.ie>
+ * Copyright © 2019-2021 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -212,6 +212,7 @@ const char* GetExtFsLabel(DWORD DriveIndex, uint64_t PartitionOffset)
 	r = ext2fs_open(volume_name, EXT2_FLAG_SKIP_MMP, 0, 0, manager, &ext2fs);
 	free(volume_name);
 	if (r == 0) {
+		assert(ext2fs != NULL);
 		strncpy(label, ext2fs->super->s_volume_name, EXT2_LABEL_LEN);
 		label[EXT2_LABEL_LEN] = 0;
 	}
@@ -313,7 +314,7 @@ BOOL FormatExtFs(DWORD DriveIndex, uint64_t PartitionOffset, DWORD BlockSize, LP
 	features.s_log_cluster_size = features.s_log_block_size;
 	size /= BlockSize;
 
-	// ext2 and ext3 have a can only accomodate up to Blocksize * 2^32 sized volumes
+	// ext2 and ext3 have a can only accommodate up to Blocksize * 2^32 sized volumes
 	if (((strcmp(FSName, FileSystemLabel[FS_EXT2]) == 0) || (strcmp(FSName, FileSystemLabel[FS_EXT3]) == 0)) &&
 		(size >= 0x100000000ULL)) {
 		SET_EXT2_FORMAT_ERROR(ERROR_INVALID_VOLUME_SIZE);

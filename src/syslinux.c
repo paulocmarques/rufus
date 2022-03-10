@@ -162,28 +162,28 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 	/* Access a copy of the ldlinux.sys & ldlinux.bss resources (downloaded or embedded) */
 	if ((syslinux_ldlinux_len[0] != 0) && (syslinux_ldlinux_len[1] != 0)) {
 		IGNORE_RETVAL(_chdirU(app_data_dir));
-		for (i=0; i<2; i++) {
+		for (i = 0; i < 2; i++) {
 			syslinux_ldlinux[i] = (unsigned char*) malloc(syslinux_ldlinux_len[i]);
 			if (syslinux_ldlinux[i] == NULL)
 				goto out;
-			static_sprintf(path, "%s/%s-%s%s/%s.%s", FILES_DIR, syslinux, img_report.sl_version_str,
+			static_sprintf(path, "%s\\%s-%s%s\\%s.%s", FILES_DIR, syslinux, img_report.sl_version_str,
 				img_report.sl_version_ext, ldlinux, i==0?"sys":"bss");
 			fd = fopen(path, "rb");
 			if (fd == NULL) {
-				uprintf("Could not open %s", path);
+				uprintf("Could not open %s\\%s", app_data_dir, path);
 				goto out;
 			}
 			length = fread(syslinux_ldlinux[i], 1, (size_t)syslinux_ldlinux_len[i], fd);
 			fclose(fd);
 			if (length != (size_t)syslinux_ldlinux_len[i]) {
-				uprintf("Could not read %s", path);
+				uprintf("Could not read %s\\%s", app_data_dir, path);
 				goto out;
 			}
-			uprintf("Using existing './%s' %s", path,
+			uprintf("Using existing '%s\\%s' %s", app_data_dir, path,
 				IsBufferInDB(syslinux_ldlinux[i], (size_t)syslinux_ldlinux_len[i])?"✓":"✗");
 		}
 	} else {
-		for (i=0; i<2; i++) {
+		for (i = 0; i < 2; i++) {
 		static_sprintf(tmp, "%s.%s", ldlinux, ldlinux_ext[i]);
 		syslinux_ldlinux_len[i] = 0;
 		syslinux_ldlinux[i] = GetResource(hMainInstance, resource[use_v5?1:0][i],
@@ -194,7 +194,7 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 	}
 
 	/* Create ldlinux.sys file */
-	static_sprintf(path, "%C:\\%s.%s", drive_letter, ldlinux, ldlinux_ext[0]);
+	static_sprintf(path, "%c:\\%s.%s", toupper(drive_letter), ldlinux, ldlinux_ext[0]);
 	f_handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
 			  FILE_SHARE_READ | FILE_SHARE_WRITE,
 			  NULL, CREATE_ALWAYS,
@@ -236,7 +236,7 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 
 	switch (file_system) {
 	case FS_NTFS:
-		static_sprintf(tmp, "%C:\\", drive_letter);
+		static_sprintf(tmp, "%c:\\", toupper(drive_letter));
 		vol_info.Handle = d_handle;
 		err = NtfsSectGetVolumeInfo(tmp, &vol_info);
 		if (err != ERROR_SUCCESS) {
@@ -250,7 +250,7 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 			vcn = extent.NextVcn) {
 				err = NtfsSectLcnToLba(&vol_info, &extent.FirstLcn, &lba);
 				if (err != ERROR_SUCCESS) {
-					uprintf("Could not translate LDLINUX.SYS LCN to disk LBA");
+					uprintf("Could not translate 'ldlinux.sys' LCN to disk LBA");
 					goto out;
 				}
 				lba.QuadPart -= vol_info.PartitionLba.QuadPart;
@@ -290,7 +290,7 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 	/* Patch ldlinux.sys and the boot sector */
 	if (syslinux_patch(sectors, nsectors, 0, 0, NULL, NULL) < 0) {
 		uprintf("Could not patch Syslinux files.");
-		uprintf("WARNING: This could be caused by your firewall having modifed downloaded content, such as 'ldlinux.sys'...");
+		uprintf("WARNING: This could be caused by your firewall having modified downloaded content, such as 'ldlinux.sys'...");
 		goto out;
 	}
 
@@ -331,16 +331,16 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 
 	if (boot_type == BT_SYSLINUX_V6) {
 		IGNORE_RETVAL(_chdirU(app_data_dir));
-		static_sprintf(path, "%s/%s-%s", FILES_DIR, syslinux, embedded_sl_version_str[1]);
+		static_sprintf(path, "%s\\%s-%s", FILES_DIR, syslinux, embedded_sl_version_str[1]);
 		IGNORE_RETVAL(_chdir(path));
-		static_sprintf(path, "%C:\\%s.%s", drive_letter, ldlinux, ldlinux_ext[2]);
+		static_sprintf(path, "%c:\\%s.%s", toupper(drive_letter), ldlinux, ldlinux_ext[2]);
 		fd = fopen(&path[3], "rb");
 		if (fd == NULL) {
 			uprintf("Caution: No '%s' was provided. The target will be missing a required Syslinux file!", &path[3]);
 		} else {
 			fclose(fd);
 			if (CopyFileU(&path[3], path, TRUE)) {
-				uprintf("Created '%s' (from '%s/%s-%s/%s') %s", path, FILES_DIR, syslinux,
+				uprintf("Created '%s' (from '%s\\%s\\%s-%s\\%s') %s", path, app_data_dir, FILES_DIR, syslinux,
 					embedded_sl_version_str[1], &path[3], IsFileInDB(&path[3])?"✓":"✗");
 			} else {
 				uprintf("Failed to create '%s': %s", path, WindowsErrorString());
@@ -354,7 +354,7 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 			goto out;
 		}
 		/* Create mboot.c32 file */
-		static_sprintf(path, "%C:\\%s", drive_letter, mboot_c32);
+		static_sprintf(path, "%c:\\%s", toupper(drive_letter), mboot_c32);
 		f_handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
 				  FILE_SHARE_READ | FILE_SHARE_WRITE,
 				  NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -368,7 +368,7 @@ BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int file_system)
 			goto out;
 		}
 		safe_closehandle(f_handle);
-		static_sprintf(path, "%C:\\syslinux.cfg", drive_letter);
+		static_sprintf(path, "%c:\\syslinux.cfg", toupper(drive_letter));
 		fd = fopen(path, "w");
 		if (fd == NULL) {
 			uprintf("Could not create ReactOS 'syslinux.cfg'");

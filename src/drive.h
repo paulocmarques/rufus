@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Drive access function calls
- * Copyright © 2011-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2022 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -94,7 +94,12 @@ typedef struct _FILE_FS_DEVICE_INFORMATION {
 	ULONG Characteristics;
 } FILE_FS_DEVICE_INFORMATION, *PFILE_FS_DEVICE_INFORMATION;
 #else
-/* MinGW is currently missing all the VDS COM stuff */
+/*
+ * MinGW is currently missing most of the VDS COM stuff.
+ * Oh, and MinGW's vds.h is screwed up unless you define the following:
+ */
+#define VDS_LUN_INFORMATION void
+#define __vdslun_h__
 #include <vds.h>
 typedef interface IVdsServiceLoader IVdsServiceLoader;
 typedef interface IVdsService IVdsService;
@@ -375,6 +380,7 @@ BOOL SetAutoMount(BOOL enable);
 BOOL GetAutoMount(BOOL* enabled);
 char* GetPhysicalName(DWORD DriveIndex);
 BOOL DeletePartition(DWORD DriveIndex, ULONGLONG PartitionOffset, BOOL bSilent);
+BOOL IsVdsAvailable(BOOL bSilent);
 BOOL ListVdsVolumes(BOOL bSilent);
 BOOL VdsRescan(DWORD dwRescanType, DWORD dwSleepTime, BOOL bSilent);
 HANDLE GetPhysicalHandle(DWORD DriveIndex, BOOL bLockDrive, BOOL bWriteAccess, BOOL bWriteShare);
@@ -383,6 +389,7 @@ char* AltGetLogicalName(DWORD DriveIndex, uint64_t PartitionOffset, BOOL bKeepTr
 char* GetExtPartitionName(DWORD DriveIndex, uint64_t PartitionOffset);
 BOOL WaitForLogical(DWORD DriveIndex, uint64_t PartitionOffset);
 HANDLE GetLogicalHandle(DWORD DriveIndex, uint64_t PartitionOffset, BOOL bLockDrive, BOOL bWriteAccess, BOOL bWriteShare);
+HANDLE AltGetLogicalHandle(DWORD DriveIndex, uint64_t PartitionOffset, BOOL bLockDrive, BOOL bWriteAccess, BOOL bWriteShare);
 int GetDriveNumber(HANDLE hDrive, char* path);
 BOOL GetDriveLetters(DWORD DriveIndex, char* drive_letters);
 UINT GetDriveTypeFromIndex(DWORD DriveIndex);

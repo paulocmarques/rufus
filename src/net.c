@@ -57,6 +57,10 @@ static DWORD error_code, fido_len = 0;
 static BOOL force_update_check = FALSE;
 static const char* request_headers = "Accept-Encoding: gzip, deflate";
 
+#if defined(__MINGW32__)
+#define INetworkListManager_get_IsConnectedToInternet INetworkListManager_IsConnectedToInternet
+#endif
+
 /*
  * FormatMessage does not handle internet errors
  * https://docs.microsoft.com/en-us/windows/desktop/wininet/wininet-errors
@@ -267,16 +271,18 @@ static HINTERNET GetInternetSession(BOOL bRetry)
 	int i;
 	char agent[64];
 	BOOL decodingSupport = TRUE;
-	DWORD dwTimeout = NET_SESSION_TIMEOUT, dwProtocolSupport = HTTP_PROTOCOL_FLAG_HTTP2;
+	VARIANT_BOOL InternetConnection = VARIANT_FALSE;
+	DWORD dwFlags, dwTimeout = NET_SESSION_TIMEOUT, dwProtocolSupport = HTTP_PROTOCOL_FLAG_HTTP2;
 	HINTERNET hSession = NULL;
 	HRESULT hr = S_FALSE;
 	INetworkListManager* pNetworkListManager;
-	NLM_CONNECTIVITY Connectivity = NLM_CONNECTIVITY_DISCONNECTED;
 
 	PF_TYPE_DECL(WINAPI, HINTERNET, InternetOpenA, (LPCSTR, DWORD, LPCSTR, LPCSTR, DWORD));
 	PF_TYPE_DECL(WINAPI, BOOL, InternetSetOptionA, (HINTERNET, DWORD, LPVOID, DWORD));
+	PF_TYPE_DECL(WINAPI, BOOL, InternetGetConnectedState, (LPDWORD, DWORD));
 	PF_INIT_OR_OUT(InternetOpenA, WinInet);
 	PF_INIT_OR_OUT(InternetSetOptionA, WinInet);
+	PF_INIT(InternetGetConnectedState, WinInet);
 
 	// Create a NetworkListManager Instance to check the network connection
 	IGNORE_RETVAL(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
@@ -284,13 +290,20 @@ static HINTERNET GetInternetSession(BOOL bRetry)
 		&IID_INetworkListManager, (LPVOID*)&pNetworkListManager);
 	if (hr == S_OK) {
 		for (i = 0; i <= WRITE_RETRIES; i++) {
-			hr = INetworkListManager_GetConnectivity(pNetworkListManager, &Connectivity);
+			hr = INetworkListManager_get_IsConnectedToInternet(pNetworkListManager, &InternetConnection);
+			// INetworkListManager may fail with ERROR_SERVICE_DEPENDENCY_FAIL if the DHCP service
+			// is not running, in which case we must fall back to using InternetGetConnectedState().
+			// See https://github.com/pbatard/rufus/issues/1801.
+			if ((hr == HRESULT_FROM_WIN32(ERROR_SERVICE_DEPENDENCY_FAIL)) && (pfInternetGetConnectedState != NULL)) {
+				InternetConnection = pfInternetGetConnectedState(&dwFlags, 0) ? VARIANT_TRUE : VARIANT_FALSE;
+				break;
+			}
 			if (hr == S_OK || !bRetry)
 				break;
 			Sleep(1000);
 		}
 	}
-	if (Connectivity == NLM_CONNECTIVITY_DISCONNECTED) {
+	if (InternetConnection == VARIANT_FALSE) {
 		SetLastError(ERROR_INTERNET_DISCONNECTED);
 		goto out;
 	}
@@ -319,7 +332,7 @@ out:
  * to the dialog in question, with WPARAM being set to nonzero for EXIT on success
  * and also attempt to indicate progress using an IDC_PROGRESS control
  * Note that when a buffer is used, the actual size of the buffer is one more than its reported
- * size (with the extra byte set to 0) to accomodate for calls that need a NUL-terminated buffer.
+ * size (with the extra byte set to 0) to accommodate for calls that need a NUL-terminated buffer.
  */
 uint64_t DownloadToFileOrBuffer(const char* url, const char* file, BYTE** buffer, HWND hProgressDialog, BOOL bTaskBarProgress)
 {
