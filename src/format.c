@@ -73,6 +73,7 @@ extern uint32_t wim_nb_files, wim_proc_files, wim_extra_files;
 static int actual_fs_type, wintogo_index = -1, wininst_index = 0;
 extern BOOL force_large_fat32, enable_ntfs_compression, lock_drive, zero_drive, fast_zeroing, enable_file_indexing, write_as_image;
 extern BOOL use_vds, write_as_esp, is_vds_available;
+extern const grub_patch_t grub_patch[2];
 uint8_t *grub2_buf = NULL, *sec_buf = NULL;
 long grub2_len;
 
@@ -909,8 +910,8 @@ static BOOL WriteSBR(HANDLE hPhysicalDrive)
 {
 	// TODO: Do we need anything special for 4K sectors?
 	DWORD size, max_size, br_size = 0x200;
-	int r, sub_type = boot_type;
-	unsigned char* buf = NULL;
+	int i, j, r, sub_type = boot_type;
+	uint8_t *buf = NULL, *patched = NULL;
 	FAKE_FD fake_fd = { 0 };
 	FILE* fp = (FILE*)&fake_fd;
 
@@ -951,6 +952,32 @@ static BOOL WriteSBR(HANDLE hPhysicalDrive)
 			if (buf == NULL) {
 				uprintf("Could not access core.img");
 				return FALSE;
+			}
+		}
+		// TODO: Compute the projected increase in size instead of harcoding it
+		if (img_report.has_grub2 == 2 && ((patched = malloc(size + 16)) != NULL)) {
+			memcpy(patched, buf, size);
+			// Patch GRUB for nonstandard prefix directory
+			for (i = 0; i < ARRAYSIZE(grub_patch); i++) {
+				if (strcmp(img_report.grub2_version, grub_patch[i].version) == 0) {
+					for (j = 0; j < ARRAYSIZE(grub_patch[i].patch); j++) {
+						if (memcmp(&patched[grub_patch[i].patch[j].src->offset], grub_patch[i].patch[j].src->data,
+							grub_patch[i].patch[j].src->size) != 0) {
+							uprintf("ERROR: Did not find expected source data for GRUB patch");
+							free(patched);
+							return FALSE;
+						}
+						memcpy(&patched[grub_patch[i].patch[j].rep->offset], grub_patch[i].patch[j].rep->data,
+							grub_patch[i].patch[j].rep->size);
+						if (grub_patch[i].patch[j].rep->size > grub_patch[i].patch[j].src->size)
+							size += grub_patch[i].patch[j].rep->size - grub_patch[i].patch[j].src->size;
+					}
+					safe_free(grub2_buf);
+					grub2_buf = patched;
+					buf = grub2_buf;
+					uprintf("Patched Grub 2.0 SBR for NONSTANDARD prefix");
+					break;
+				}
 			}
 		}
 		break;
@@ -2064,23 +2091,6 @@ DWORD WINAPI FormatThread(void* param)
 	// Write an image file
 	if ((boot_type == BT_IMAGE) && write_as_image) {
 		WriteDrive(hPhysicalDrive, FALSE);
-
-		// Trying to mount accessible partitions after writing an image leads to the
-		// creation of the infamous 'System Volume Information' folder on ESPs, which
-		// in turn leads to checksum errors for Ubuntu's boot/grub/efi.img (that maps
-		// to the Ubuntu ESP). So we only call the code below for Ventoy's vtsi images.
-		if (img_report.compression_type == BLED_COMPRESSION_VTSI) {
-			// If the image contains a partition we might be able to access, try to re-mount it
-			safe_unlockclose(hPhysicalDrive);
-			safe_unlockclose(hLogicalVolume);
-			Sleep(200);
-			WaitForLogical(DriveIndex, 0);
-			if (GetDrivePartitionData(SelectedDrive.DeviceNumber, fs_name, sizeof(fs_name), TRUE)) {
-				volume_name = GetLogicalName(DriveIndex, 0, TRUE, TRUE);
-				if ((volume_name != NULL) && (MountVolume(drive_name, volume_name)))
-					uprintf("Remounted %s as %c:", volume_name, toupper(drive_name[0]));
-			}
-		}
 		goto out;
 	}
 
@@ -2403,13 +2413,27 @@ out:
 		AltUnmountVolume(volume_name, TRUE);
 	else
 		safe_free(volume_name);
-	if ((boot_type == BT_IMAGE) && write_as_image) {
-		PrintInfo(0, MSG_320, lmprintf(MSG_307));
-		VdsRescan(VDS_RESCAN_REFRESH, 0, TRUE);
-	}
 	safe_free(buffer);
 	safe_unlockclose(hLogicalVolume);
 	safe_unlockclose(hPhysicalDrive);	// This can take a while
+	if ((boot_type == BT_IMAGE) && write_as_image) {
+		PrintInfo(0, MSG_320, lmprintf(MSG_307));
+		Sleep(200);
+		VdsRescan(VDS_RESCAN_REFRESH, 0, TRUE);
+		// Trying to mount accessible partitions after writing an image leads to the
+		// creation of the infamous 'System Volume Information' folder on ESPs, which
+		// in turn leads to checksum errors for Ubuntu's boot/grub/efi.img (that maps
+		// to the Ubuntu ESP). So we only call the code below if there are no ESPs or
+		// if we're running a Ventoy image.
+		if ((GetEspOffset(DriveIndex) == 0) || (img_report.compression_type == BLED_COMPRESSION_VTSI)) {
+			WaitForLogical(DriveIndex, 0);
+			if (GetDrivePartitionData(SelectedDrive.DeviceNumber, fs_name, sizeof(fs_name), TRUE)) {
+				volume_name = GetLogicalName(DriveIndex, 0, TRUE, TRUE);
+				if ((volume_name != NULL) && (MountVolume(drive_name, volume_name)))
+					uprintf("Remounted %s as %c:", volume_name, toupper(drive_name[0]));
+			}
+		}
+	}
 	if (IS_ERROR(FormatStatus)) {
 		volume_name = GetLogicalName(DriveIndex, partition_offset[PI_MAIN], TRUE, TRUE);
 		if (volume_name != NULL) {

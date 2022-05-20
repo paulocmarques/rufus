@@ -1168,7 +1168,8 @@ static void UpdateImage(BOOL update_image_option_only)
 	ComboBox_ResetContent(hImageOption);
 
 	if (!img_report.is_windows_img) {	// Straight install.wim/install.esd only have Windows To Go option
-		if (img_report.win_version.major == 11) {
+		// Can't remove restrictions if running on Windows 7 or when running the appstore version
+		if (nWindowsVersion >= WINDOWS_8 && !appstore_version && img_report.win_version.major == 11) {
 			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_322)), IMOP_WIN_STANDARD));
 			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_323)), IMOP_WIN_EXTENDED));
 		} else {
@@ -1288,6 +1289,13 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 		(img_report.image_size == 0) ||
 		(!img_report.is_iso && (img_report.is_bootable_img <= 0) && !img_report.is_windows_img)) {
 		// Failed to scan image
+		if (img_report.is_bootable_img < 0)
+			MessageBoxExU(hMainDialog, lmprintf(MSG_325, image_path), lmprintf(MSG_042), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
+		else
+			MessageBoxExU(hMainDialog, lmprintf(MSG_082), lmprintf(MSG_081), MB_OK | MB_ICONINFORMATION | MB_IS_RTL, selected_langid);
+		// Make sure to relinquish image_path before we call UpdateImage
+		// otherwise the boot selection dropdown won't be properly reset.
+		safe_free(image_path);
 		SendMessage(hMainDialog, UM_PROGRESS_EXIT, 0, 0);
 		UpdateImage(FALSE);
 		SetMBRProps();
@@ -1295,11 +1303,6 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 		PrintInfoDebug(0, MSG_203);
 		PrintStatus(0, MSG_203);
 		EnableControls(TRUE, FALSE);
-		if (img_report.is_bootable_img < 0)
-			MessageBoxExU(hMainDialog, lmprintf(MSG_325, image_path), lmprintf(MSG_042), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
-		else
-			MessageBoxExU(hMainDialog, lmprintf(MSG_082), lmprintf(MSG_081), MB_OK | MB_ICONINFORMATION | MB_IS_RTL, selected_langid);
-		safe_free(image_path);
 		goto out;
 	}
 
@@ -2331,9 +2334,6 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		case IDC_LOG:
 			// Place the log Window to the right (or left for RTL) of our dialog on first display
 			if (first_log_display) {
-				// Can't link to dwmapi.lib since it sideloads dwapi.dll *before* we get a chance
-				// to prevent local directory lookup (Sideloading mitigation).
-				PF_TYPE_DECL(WINAPI, HRESULT, DwmGetWindowAttribute, (HWND, DWORD, PVOID, DWORD));
 				GetClientRect(GetDesktopWindow(), &DesktopRect);
 				GetWindowRect(hLogDialog, &DialogRect);
 				nWidth = DialogRect.right - DialogRect.left;
@@ -2341,14 +2341,13 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				GetWindowRect(hDlg, &DialogRect);
 				offset = GetSystemMetrics(SM_CXBORDER);
 				if (nWindowsVersion >= WINDOWS_10) {
-					PF_INIT(DwmGetWindowAttribute, Dwmapi);
 					// See https://stackoverflow.com/a/42491227/1069307
 					// I agree with Stephen Hazel: Whoever at Microsoft thought it would be a great idea to
 					// add a *FRIGGING INVISIBLE BORDER* in Windows 10 should face the harshest punishment!
-					if (pfDwmGetWindowAttribute != NULL) {
-						pfDwmGetWindowAttribute(hDlg, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(RECT));
-						offset += 2 * (DialogRect.left - rc.left);
-					}
+					// Also calling this API will create DLL sideloading issues through 'dwmapi.dll' so make
+					// sure you delay-load it in your application.
+					DwmGetWindowAttribute(hDlg, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(RECT));
+					offset += 2 * (DialogRect.left - rc.left);
 				}
 				if (right_to_left_mode)
 					Point.x = max(DialogRect.left - offset - nWidth, 0);

@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Networking functionality (web file download, check for update, etc.)
- * Copyright © 2012-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2012-2022 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -349,6 +349,7 @@ uint64_t DownloadToFileOrBuffer(const char* url, const char* file, BYTE** buffer
 	uint64_t size = 0, total_size = 0;
 
 	// Can't link with wininet.lib because of sideloading issues
+	// And we can't delay-load wininet.dll with MinGW either because the application simply exits on startup...
 	PF_TYPE_DECL(WINAPI, BOOL, InternetCrackUrlA, (LPCSTR, DWORD, DWORD, LPURL_COMPONENTSA));
 	PF_TYPE_DECL(WINAPI, HINTERNET, InternetConnectA, (HINTERNET, LPCSTR, INTERNET_PORT, LPCSTR, LPCSTR, DWORD, DWORD, DWORD_PTR));
 	PF_TYPE_DECL(WINAPI, BOOL, InternetReadFile, (HINTERNET, LPVOID, DWORD, LPDWORD));
@@ -607,11 +608,11 @@ HANDLE DownloadSignedFileThreaded(const char* url, const char* file, HWND hProgr
 	return CreateThread(NULL, 0, DownloadSignedFileThread, &args, 0, NULL);
 }
 
-static __inline uint64_t to_uint64_t(uint16_t x[4]) {
+static __inline uint64_t to_uint64_t(uint16_t x[3]) {
 	int i;
 	uint64_t ret = 0;
-	for (i=0; i<3; i++)
-		ret = (ret<<16) + x[i];
+	for (i = 0; i < 3; i++)
+		ret = (ret << 16) + x[i];
 	return ret;
 }
 
