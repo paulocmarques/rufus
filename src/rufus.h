@@ -339,7 +339,8 @@ enum checksum_type {
 #define IS_BIOS_BOOTABLE(r) (HAS_BOOTMGR(r) || HAS_SYSLINUX(r) || HAS_WINPE(r) || HAS_GRUB(r) || HAS_REACTOS(r) || HAS_KOLIBRIOS(r))
 #define HAS_WINTOGO(r)      (HAS_BOOTMGR(r) && IS_EFI_BOOTABLE(r) && HAS_WININST(r))
 #define HAS_PERSISTENCE(r)  ((HAS_SYSLINUX(r) || HAS_GRUB(r)) && !(HAS_WINDOWS(r) || HAS_REACTOS(r) || HAS_KOLIBRIOS(r)))
-#define IS_FAT(fs)          ((fs_type == FS_FAT16) || (fs_type == FS_FAT32))
+#define IS_FAT(fs)          ((fs == FS_FAT16) || (fs == FS_FAT32))
+#define IS_EXT(fs)          ((fs >= FS_EXT2) && (fs <= FS_EXT4))
 #define SYMLINKS_RR         0x01
 #define SYMLINKS_UDF        0x02
 
@@ -400,6 +401,17 @@ typedef struct {
 /* Isolate the Syslinux version numbers */
 #define SL_MAJOR(x) ((uint8_t)((x)>>8))
 #define SL_MINOR(x) ((uint8_t)(x))
+
+typedef struct {
+	char* id;
+	char* name;
+	char* display_name;
+	char* label;
+	char* hub;
+	DWORD index;
+	uint32_t port;
+	uint64_t size;
+} RUFUS_DRIVE;
 
 typedef struct {
 	uint16_t version[3];
