@@ -1,6 +1,6 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
- * Copyright © 2011-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2022 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -63,7 +63,6 @@
 #define MIN_DRIVE_SIZE              8			// Minimum size a drive must have, to be formattable (in MB)
 #define MIN_EXTRA_PART_SIZE         (1024*1024)	// Minimum size of the extra partition, in bytes
 #define MIN_EXT_SIZE                (256*1024*1024)	// Minimum size we allow for ext formatting
-#define MAX_ARCHS                   9			// Number of arhitectures we recognize
 #define MAX_DRIVES                  (DRIVE_INDEX_MAX - DRIVE_INDEX_MIN)
 #define MAX_TOOLTIPS                128
 #define MAX_SIZE_SUFFIXES           6			// bytes, KB, MB, GB, TB, PB
@@ -75,6 +74,7 @@
 #define MAX_GUID_STRING_LENGTH      40
 #define MAX_PARTITIONS              16			// Maximum number of partitions we handle
 #define MAX_ESP_TOGGLE              8			// Maximum number of entries we record to toggle GPT ESP back and forth
+#define MAX_IGNORE_USB              8			// Maximum number of USB drives we want to ignore
 #define MAX_ISO_TO_ESP_SIZE         512			// Maximum size we allow for the ISO → ESP option (in MB)
 #define MAX_DEFAULT_LIST_CARD_SIZE  200			// Size above which we don't list a card without enable HDD or Alt-F (in GB)
 #define MAX_SECTORS_TO_CLEAR        128			// nb sectors to zap when clearing the MBR/GPT (must be >34)
@@ -85,11 +85,7 @@
 #define STATUS_MSG_TIMEOUT          3500		// How long should cheat mode messages appear for on the status bar
 #define WRITE_RETRIES               4
 #define WRITE_TIMEOUT               5000		// How long we should wait between write retries (in ms)
-#if defined(_DEBUG)
-#define SEARCH_PROCESS_TIMEOUT      60000
-#else
 #define SEARCH_PROCESS_TIMEOUT      10000		// How long we should search for conflicting processes before giving up (in ms)
-#endif
 #define NET_SESSION_TIMEOUT         3500		// How long we should wait to connect, send or receive internet data
 #define MARQUEE_TIMER_REFRESH       10			// Time between progress bar marquee refreshes, in ms
 #define FS_DEFAULT                  FS_FAT32
@@ -161,6 +157,7 @@
 #define safe_release_dc(hDlg, hDC) do {if ((hDC != INVALID_HANDLE_VALUE) && (hDC != NULL)) {ReleaseDC(hDlg, hDC); hDC = NULL;}} while(0)
 #define safe_sprintf(dst, count, ...) do {_snprintf(dst, count, __VA_ARGS__); (dst)[(count)-1] = 0; } while(0)
 #define static_sprintf(dst, ...) safe_sprintf(dst, sizeof(dst), __VA_ARGS__)
+#define safe_atoi(str) ((((char*)(str))==NULL)?0:atoi(str))
 #define safe_strlen(str) ((((char*)(str))==NULL)?0:strlen(str))
 #define safe_strdup _strdup
 #define to_windows_path(str) do { size_t __i; for (__i = 0; __i < safe_strlen(str); __i++) if (str[__i] == '/') str[__i] = '\\'; } while(0)
@@ -332,6 +329,7 @@ enum checksum_type {
 #define HAS_WINPE(r)        (((r.winpe & WINPE_I386) == WINPE_I386)||((r.winpe & WINPE_AMD64) == WINPE_AMD64)||((r.winpe & WINPE_MININT) == WINPE_MININT))
 #define HAS_WINDOWS(r)      (HAS_BOOTMGR(r) || (r.uses_minint) || HAS_WINPE(r))
 #define HAS_WIN7_EFI(r)     ((r.has_efi == 1) && HAS_WININST(r))
+#define IS_WINDOWS_11(r)    (r.has_bootmgr_efi && (r.win_version.major >= 11))
 #define HAS_EFI_IMG(r)      (r.efi_img_path[0] != 0)
 #define IS_DD_BOOTABLE(r)   (r.is_bootable_img > 0)
 #define IS_DD_ONLY(r)       ((r.is_bootable_img > 0) && (!r.is_iso || r.disable_iso))
@@ -482,13 +480,18 @@ enum WindowsVersion {
 	WINDOWS_MAX
 };
 
-enum CpuArch {
-	CPU_ARCH_X86_32 = 0,
-	CPU_ARCH_X86_64,
-	CPU_ARCH_ARM_32,
-	CPU_ARCH_ARM_64,
-	CPU_ARCH_UNDEFINED,
-	CPU_ARCH_MAX
+enum ArchType {
+	ARCH_UNKNOWN = 0,
+	ARCH_X86_32,
+	ARCH_X86_64,
+	ARCH_ARM_32,
+	ARCH_ARM_64,
+	ARCH_IA_64,
+	ARCH_RISCV_32,
+	ARCH_RISCV_64,
+	ARCH_RISCV_128,
+	ARCH_EBC,
+	ARCH_MAX
 };
 
 /*
@@ -523,7 +526,7 @@ extern char app_data_dir[MAX_PATH], *image_path, *fido_url;
  */
 extern void GetWindowsVersion(void);
 extern BOOL is_x64(void);
-extern BOOL GetCpuArch(void);
+extern int GetCpuArch(void);
 extern const char *WindowsErrorString(void);
 extern void DumpBufferHex(void *buf, size_t size);
 extern void PrintStatusInfo(BOOL info, BOOL debug, unsigned int duration, int msg_id, ...);
@@ -557,7 +560,7 @@ extern BOOL CreateTooltip(HWND hControl, const char* message, int duration);
 extern void DestroyTooltip(HWND hWnd);
 extern void DestroyAllTooltips(void);
 extern BOOL Notification(int type, const char* dont_display_setting, const notification_info* more_info, char* title, char* format, ...);
-extern int SelectionDialog(char* title, char* message, char** choices, int size);
+extern int SelectionDialog(int style, char* title, char* message, char** choices, int size, int mask);
 extern void ListDialog(char* title, char* message, char** items, int size);
 extern SIZE GetTextSize(HWND hCtrl, char* txt);
 extern BOOL ExtractAppIcon(const char* filename, BOOL bSilent);

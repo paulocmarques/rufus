@@ -1,7 +1,7 @@
 /*
 * Rufus: The Reliable USB Formatting Utility
 * Constants and defines missing from various toolchains
-* Copyright © 2016-2017 Pete Batard <pete@akeo.ie>
+* Copyright © 2016-2022 Pete Batard <pete@akeo.ie>
 *
 * This program is free software: you can redistribute it and/or modify
 * it under the terms of the GNU General Public License as published by
@@ -103,6 +103,32 @@ static __inline void *_reallocf(void *ptr, size_t size) {
 	if (!ret)
 		free(ptr);
 	return ret;
+}
+
+static __inline int _log2(register int val)
+{
+	int ret = 0;
+	if (val < 0)
+		return -2;
+	while (val >>= 1)
+		ret++;
+	return ret;
+}
+
+// Remap bits from a byte according to an 8x8 bit matrix
+static __inline uint8_t remap8(uint8_t src, uint8_t* map, const BOOL reverse)
+{
+	uint8_t i, m = 1, r = 0;
+	for (i = 0, m = 1; i < 8; i++, m <<= 1) {
+		if (reverse) {
+			if (src & map[i])
+				r |= m;
+		} else {
+			if (src & m)
+				r |= map[i];
+		}
+	}
+	return r;
 }
 
 /* Why oh why does Microsoft have to make everybody suffer with their braindead use of Unicode? */

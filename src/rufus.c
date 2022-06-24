@@ -1,6 +1,6 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
- * Copyright © 2011-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2022 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -60,11 +60,22 @@ enum bootcheck_return {
 	BOOTCHECK_GENERAL_ERROR = -3,
 };
 
+#define UNATTEND_SECUREBOOT_TPM_MASK        0x01
+#define UNATTEND_MINRAM_MINDISK_MASK        0x02
+#define UNATTEND_NO_ONLINE_ACCOUNT_MASK     0x04
+#define UNATTEND_NO_DATA_COLLECTION_MASK    0x08
+#define UNATTEND_OFFLINE_INTERNAL_DRIVES    0x10
+
+#define UNATTEND_WINPE_SETUP_MASK           (UNATTEND_SECUREBOOT_TPM_MASK | UNATTEND_MINRAM_MINDISK_MASK)
+#define UNATTEND_SPECIALIZE_DEPLOYMENT_MASK (UNATTEND_NO_ONLINE_ACCOUNT_MASK)
+#define UNATTEND_OOBE_SHELL_SETUP           (UNATTEND_NO_DATA_COLLECTION_MASK)
+#define UNATTEND_OFFLINE_SERVICING          (UNATTEND_OFFLINE_INTERNAL_DRIVES)
+
 static const char* cmdline_hogger = "rufus.com";
 static const char* ep_reg = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer";
 static const char* vs_reg = "Software\\Microsoft\\VisualStudio";
-static const char* arch_name[MAX_ARCHS] = {
-	"x86_32", "Itanic", "x86_64", "ARM", "ARM64", "EBC","Risc-V 32", "Risc-V 64", "Risc-V 128" };
+static const char* arch_name[ARCH_MAX] = {
+	"unknown", "x86_32", "x86_64", "ARM", "ARM64", "Itanic", "RISC-V 32", "RISC-V 64", "RISC-V 128", "EBC" };
 static BOOL existing_key = FALSE;	// For LGP set/restore
 static BOOL size_check = TRUE;
 static BOOL log_displayed = FALSE;
@@ -79,6 +90,8 @@ static BOOL allowed_filesystem[FS_MAX] = { 0 };
 static int64_t last_iso_blocking_status;
 static int selected_pt = -1, selected_fs = FS_UNKNOWN, preselected_fs = FS_UNKNOWN;
 static int image_index = 0, select_index = 0;
+static int unattend_xml_mask = (UNATTEND_SECUREBOOT_TPM_MASK | UNATTEND_NO_ONLINE_ACCOUNT_MASK |
+	UNATTEND_OFFLINE_INTERNAL_DRIVES);
 static RECT relaunch_rc = { -65536, -65536, 0, 0};
 static UINT uMBRChecked = BST_UNCHECKED;
 static HANDLE format_thread = NULL;
@@ -116,16 +129,16 @@ HWND hDeviceList, hPartitionScheme, hTargetSystem, hFileSystem, hClusterSize, hL
 HWND hImageOption, hLogDialog = NULL, hProgress = NULL, hDiskID;
 HANDLE dialog_handle = NULL;
 BOOL is_x86_32, use_own_c32[NB_OLD_C32] = { FALSE, FALSE }, mbr_selected_by_user = FALSE;
-BOOL op_in_progress = TRUE, right_to_left_mode = FALSE, has_uefi_csm = FALSE, its_a_me_mario = FALSE;
+BOOL op_in_progress = TRUE, right_to_left_mode = FALSE, has_uefi_csm = FALSE, its_a_me_mario = FALSE, enable_inplace = FALSE;
 BOOL enable_HDDs = FALSE, enable_VHDs = TRUE, enable_ntfs_compression = FALSE, no_confirmation_on_cancel = FALSE, lock_drive = TRUE;
 BOOL advanced_mode_device, advanced_mode_format, allow_dual_uefi_bios, detect_fakes, enable_vmdk, force_large_fat32, usb_debug;
 BOOL use_fake_units, preserve_timestamps = FALSE, fast_zeroing = FALSE, app_changed_size = FALSE;
 BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE, enable_file_indexing, large_drive = FALSE;
 BOOL write_as_image = FALSE, write_as_esp = FALSE, use_vds = FALSE, ignore_boot_marker = FALSE;
-BOOL appstore_version = FALSE, is_vds_available = TRUE;
+BOOL appstore_version = FALSE, is_vds_available = TRUE, set_drives_offline = FALSE;
 float fScale = 1.0f;
 int dialog_showing = 0, selection_default = BT_IMAGE, persistence_unit_selection = -1, imop_win_sel = 0;
-int default_fs, fs_type, boot_type, partition_type, target_type; // file system, boot type, partition type, target type
+int default_fs, fs_type, boot_type, partition_type, target_type;
 int force_update = 0, default_thread_priority = THREAD_PRIORITY_ABOVE_NORMAL;
 char szFolderPath[MAX_PATH], app_dir[MAX_PATH], system_dir[MAX_PATH], temp_dir[MAX_PATH], sysnative_dir[MAX_PATH];
 char app_data_dir[MAX_PATH], user_dir[MAX_PATH];
@@ -133,7 +146,7 @@ char embedded_sl_version_str[2][12] = { "?.??", "?.??" };
 char embedded_sl_version_ext[2][32];
 char ClusterSizeLabel[MAX_CLUSTER_SIZES][64];
 char msgbox[1024], msgbox_title[32], *ini_file = NULL, *image_path = NULL, *short_image_path;
-char *archive_path = NULL, image_option_txt[128], *fido_url = NULL;
+char *archive_path = NULL, image_option_txt[128], *fido_url = NULL, *unattend_xml_path = NULL;
 StrArray BlockingProcess, ImageList;
 // Number of steps for each FS for FCC_STRUCTURE_PROGRESS
 const int nb_steps[FS_MAX] = { 5, 5, 12, 1, 10, 1, 1, 1, 1 };
@@ -1168,22 +1181,15 @@ static void UpdateImage(BOOL update_image_option_only)
 
 	ComboBox_ResetContent(hImageOption);
 
-	if (!img_report.is_windows_img) {	// Straight install.wim/install.esd only have Windows To Go option
-		// Can't remove restrictions if running on Windows 7 or when running the appstore version
-		if (nWindowsVersion >= WINDOWS_8 && !appstore_version && img_report.win_version.major == 11) {
-			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_322)), IMOP_WIN_STANDARD));
-			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_323)), IMOP_WIN_EXTENDED));
-		} else {
-			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_117)), IMOP_WIN_STANDARD));
-		}
-	}
+	if (!img_report.is_windows_img)	// Straight install.wim/install.esd only have Windows To Go option
+		IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_117)), IMOP_WIN_STANDARD));
 	IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_118)), IMOP_WIN_TO_GO));
 	IGNORE_RETVAL(ComboBox_SetCurSel(hImageOption, imop_win_sel));
 }
 
 static uint8_t FindArch(const char* filename)
 {
-	uint8_t ret = 0;
+	uint8_t ret = ARCH_UNKNOWN;
 	HANDLE hFile = NULL, hFileMapping = NULL;
 	PIMAGE_DOS_HEADER pImageDOSHeader = NULL;
 	// NB: The field we are after is at the same location for 32 and 64-bit
@@ -1219,31 +1225,31 @@ static uint8_t FindArch(const char* filename)
 
 	switch (pImageNTHeader->FileHeader.Machine) {
 	case IMAGE_FILE_MACHINE_I386:
-		ret = 1;
-		break;
-	case IMAGE_FILE_MACHINE_IA64:
-		ret = 2;
+		ret = ARCH_X86_32;
 		break;
 	case IMAGE_FILE_MACHINE_AMD64:
-		ret = 3;
+		ret = ARCH_X86_64;
 		break;
 	case IMAGE_FILE_MACHINE_ARM:
-		ret = 4;
+		ret = ARCH_ARM_32;
 		break;
 	case IMAGE_FILE_MACHINE_ARM64:
-		ret = 5;
+		ret = ARCH_ARM_64;
 		break;
-	case IMAGE_FILE_MACHINE_EBC:
-		ret = 6;
+	case IMAGE_FILE_MACHINE_IA64:
+		ret = ARCH_IA_64;
 		break;
 	case IMAGE_FILE_MACHINE_RISCV32:
-		ret = 7;
+		ret = ARCH_RISCV_32;
 		break;
 	case IMAGE_FILE_MACHINE_RISCV64:
-		ret = 8;
+		ret = ARCH_RISCV_64;
 		break;
 	case IMAGE_FILE_MACHINE_RISCV128:
-		ret = 9;
+		ret = ARCH_RISCV_128;
+		break;
+	case IMAGE_FILE_MACHINE_EBC:
+		ret = ARCH_EBC;
 		break;
 	}
 
@@ -1252,8 +1258,112 @@ out:
 		UnmapViewOfFile(pImageDOSHeader);
 	safe_closehandle(hFileMapping);
 	safe_closehandle(hFile);
-	assert(ret <= MAX_ARCHS);
+	assert(ret < ARCH_MAX);
 	return ret;
+}
+
+static char* CreateUnattendXml(int arch, int mask)
+{
+	static char path[MAX_PATH];
+	FILE* fd;
+	int i, order;
+	const char* xml_arch_names[5] = { "x86", "amd64", "arm", "arm64" };
+	const char* bypass_name[4] = { "BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassStorageCheck" };
+	if (arch < ARCH_X86_32 || arch >= ARCH_ARM_64 || mask == 0)
+		return NULL;
+	arch--;
+	// coverity[swapped_arguments]
+	if (GetTempFileNameU(temp_dir, APPLICATION_NAME, 0, path) == 0)
+		return NULL;
+	fd = fopen(path, "w");
+	if (fd == NULL)
+		return NULL;
+
+	fprintf(fd, "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+	fprintf(fd, "<unattend xmlns=\"urn:schemas-microsoft-com:unattend\">\n");
+
+	// This part produces the unbecoming display of a command prompt window during initial setup, which
+	// may scare users... But the Windows Store version doesn't allow us to edit an offline registry...
+	if (mask & UNATTEND_WINPE_SETUP_MASK) {
+		enable_inplace = TRUE;
+		order = 1;
+		fprintf(fd, "  <settings pass=\"windowsPE\">\n");
+		fprintf(fd, "    <component name=\"Microsoft-Windows-Setup\" processorArchitecture=\"%s\" language=\"neutral\" "
+			"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+			"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
+		// WinPE will complain if we don't provide a product key. *Any* product key. This is soooo idiotic...
+		fprintf(fd, "      <UserData>\n");
+		fprintf(fd, "        <ProductKey>\n");
+		fprintf(fd, "          <Key>xxxxx-xxxxx-xxxxx-xxxxx-xxxxx</Key>\n");
+		fprintf(fd, "        </ProductKey>\n");
+		fprintf(fd, "      </UserData>\n");
+		fprintf(fd, "      <RunSynchronous>\n");
+		for (i = 0; i < ARRAYSIZE(bypass_name); i++) {
+			if (!(mask & (1 << (i/2))))
+				continue;
+			fprintf(fd, "        <RunSynchronousCommand wcm:action=\"add\">\n");
+			fprintf(fd, "          <Order>%d</Order>\n", order++);
+			fprintf(fd, "          <Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v %s /t REG_DWORD /d 1 /f</Path>\n", bypass_name[i]);
+			fprintf(fd, "        </RunSynchronousCommand>\n");
+		}
+		fprintf(fd, "      </RunSynchronous>\n");
+		fprintf(fd, "    </component>\n");
+		fprintf(fd, "  </settings>\n");
+	}
+
+	if (mask & UNATTEND_SPECIALIZE_DEPLOYMENT_MASK) {
+		order = 1;
+		fprintf(fd, "  <settings pass=\"specialize\">\n");
+		fprintf(fd, "    <component name=\"Microsoft-Windows-Deployment\" processorArchitecture=\"%s\" language=\"neutral\" "
+			"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+			"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
+		fprintf(fd, "      <RunSynchronous>\n");
+		// This part was picked from https://github.com/AveYo/MediaCreationTool.bat/blob/main/bypass11/AutoUnattend.xml
+		if (mask & UNATTEND_NO_ONLINE_ACCOUNT_MASK) {
+			fprintf(fd, "        <RunSynchronousCommand wcm:action=\"add\">\n");
+			fprintf(fd, "          <Order>%d</Order>\n", order++);
+			fprintf(fd, "          <Path>reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>\n");
+			fprintf(fd, "        </RunSynchronousCommand>\n");
+		}
+		fprintf(fd, "      </RunSynchronous>\n");
+		fprintf(fd, "    </component>\n");
+		fprintf(fd, "  </settings>\n");
+	}
+
+	if (mask & UNATTEND_OOBE_SHELL_SETUP) {
+		order = 1;
+		fprintf(fd, "  <settings pass=\"oobeSystem\">\n");
+		fprintf(fd, "    <component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"%s\" language=\"neutral\" "
+			"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+			"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
+		// https://docs.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-oobe-protectyourpc
+		// It is really super insidous of Microsoft to call this option "ProtectYourPC", when it's really only about
+		// data collection. But of course, if it was called "AllowDataCollection", everyone would turn it off...
+		if (mask & UNATTEND_NO_DATA_COLLECTION_MASK) {
+			fprintf(fd, "      <OOBE>\n");
+			fprintf(fd, "        <ProtectYourPC>3</ProtectYourPC>\n");
+			fprintf(fd, "      </OOBE>\n");
+		}
+		fprintf(fd, "    </component>\n");
+		fprintf(fd, "  </settings>\n");
+	}
+
+	if (mask & UNATTEND_OFFLINE_SERVICING) {
+		fprintf(fd, "  <settings pass=\"offlineServicing\">\n");
+		if (mask & UNATTEND_OFFLINE_INTERNAL_DRIVES) {
+			set_drives_offline = TRUE;
+			fprintf(fd, "    <component name=\"Microsoft-Windows-PartitionManager\" processorArchitecture=\"%s\" language=\"neutral\" "
+				"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+				"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
+			fprintf(fd, "      <SanPolicy>4</SanPolicy>\n");
+			fprintf(fd, "    </component>\n");
+		}
+		fprintf(fd, "  </settings>\n");
+	}
+
+	fprintf(fd, "</unattend>\n");
+	fclose(fd);
+	return path;
 }
 
 // The scanning process can be blocking for message processing => use a thread
@@ -1291,7 +1401,7 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 		(!img_report.is_iso && (img_report.is_bootable_img <= 0) && !img_report.is_windows_img)) {
 		// Failed to scan image
 		if (img_report.is_bootable_img < 0)
-			MessageBoxExU(hMainDialog, lmprintf(MSG_325, image_path), lmprintf(MSG_042), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
+			MessageBoxExU(hMainDialog, lmprintf(MSG_322, image_path), lmprintf(MSG_042), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
 		else
 			MessageBoxExU(hMainDialog, lmprintf(MSG_082), lmprintf(MSG_081), MB_OK | MB_ICONINFORMATION | MB_IS_RTL, selected_langid);
 		// Make sure to relinquish image_path before we call UpdateImage
@@ -1315,7 +1425,8 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 			if (WimExtractFile(image_path, 1, "Windows\\Boot\\EFI\\bootmgr.efi", tmp_path, TRUE)) {
 				arch = FindArch(tmp_path);
 				if (arch != 0) {
-					uprintf("  Image contains a%s %s EFI boot manager", arch_name[arch - 1], (arch < 7) ? "n" : "");
+					uprintf("  Image contains a%s %s EFI boot manager",
+						(arch >= ARCH_RISCV_32 && arch <= ARCH_RISCV_128) ? "" : "n", arch_name[arch]);
 					img_report.has_efi = 1 | (1 << arch);
 					img_report.has_bootmgr_efi = TRUE;
 					img_report.wininst_index = 1;
@@ -1405,6 +1516,8 @@ out:
 	ExitThread(0);
 }
 
+#define MAP_BIT(bit) do { map[_log2(bit)] = b; b <<= 1; } while(0)
+
 // Likewise, boot check will block message processing => use a thread
 static DWORD WINAPI BootCheckThread(LPVOID param)
 {
@@ -1454,23 +1567,20 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE * MB) && HAS_REGULAR_EFI(img_report) &&
 					(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type)) {
 					char* choices[3] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP"), lmprintf(MSG_277, dd_image) };
-					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
-						choices, 3);
+					i = SelectionDialog(BS_AUTORADIOBUTTON, lmprintf(MSG_274, "ISOHybrid"),
+						lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), choices, 3, 1);
 					if (i < 0)	// Cancel
 						goto out;
-					else if (i == 2)
-						write_as_esp = TRUE;
-					else if (i == 3)
-						write_as_image = TRUE;
+					write_as_esp = (i & 2);
+					write_as_image = (i & 4);
 					esp_already_asked = TRUE;
 				} else {
 					char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, dd_image) };
-					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
-						choices, 2);
+					i = SelectionDialog(BS_AUTORADIOBUTTON, lmprintf(MSG_274, "ISOHybrid"),
+						lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), choices, 2, 1);
 					if (i < 0)	// Cancel
 						goto out;
-					else if (i == 2)
-						write_as_image = TRUE;
+					write_as_image = (i & 2);
 				}
 			}
 		}
@@ -1504,6 +1614,32 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			default:
 				break;
 			}
+			if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_11(img_report)) {
+				StrArray options;
+				int arch = _log2(img_report.has_efi >> 1);
+				uint8_t map[8] = { 0 }, b = 1;
+				StrArrayCreate(&options, 2);
+				if (img_report.win_version.build >= 22500) {
+					StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
+					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT_MASK);
+				}
+				StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
+				MAP_BIT(UNATTEND_NO_DATA_COLLECTION_MASK);
+				StrArrayAdd(&options, lmprintf(MSG_332), TRUE);
+				MAP_BIT(UNATTEND_OFFLINE_INTERNAL_DRIVES);
+				i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_326), lmprintf(MSG_327),
+					options.String, options.Index, remap8(unattend_xml_mask, map, FALSE));
+				StrArrayDestroy(&options);
+				if (i < 0)
+					goto out;
+				// Remap i to the correct bit positions before calling CreateUnattendXml()
+				i = remap8(i, map, TRUE);
+				unattend_xml_path = CreateUnattendXml(arch, i);
+				// Keep the bits we didn't process
+				unattend_xml_mask &= ~(remap8(0xff, map, TRUE));
+				// And add back the bits we did process
+				unattend_xml_mask |= i;
+			}
 		} else if (target_type == TT_UEFI) {
 			if (!IS_EFI_BOOTABLE(img_report)) {
 				// Unsupported ISO
@@ -1515,6 +1651,33 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				if (MessageBoxExU(hMainDialog, lmprintf(MSG_102), lmprintf(MSG_101), MB_YESNO | MB_ICONERROR | MB_IS_RTL, selected_langid) == IDYES)
 					ShellExecuteA(hMainDialog, "open", SEVENZIP_URL, NULL, NULL, SW_SHOWNORMAL);
 				goto out;
+			}
+			if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_11(img_report)) {
+				StrArray options;
+				int arch = _log2(img_report.has_efi >> 1);
+				uint8_t map[8] = { 0 }, b = 1;
+				StrArrayCreate(&options, 4);
+				StrArrayAdd(&options, lmprintf(MSG_328), TRUE);
+				MAP_BIT(UNATTEND_SECUREBOOT_TPM_MASK);
+				StrArrayAdd(&options, lmprintf(MSG_329), TRUE);
+				MAP_BIT(UNATTEND_MINRAM_MINDISK_MASK);
+				if (img_report.win_version.build >= 22500) {
+					StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
+					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT_MASK);
+				}
+				StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
+				MAP_BIT(UNATTEND_NO_DATA_COLLECTION_MASK);
+				i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_326), lmprintf(MSG_327),
+					options.String, options.Index, remap8(unattend_xml_mask, map, FALSE));
+				StrArrayDestroy(&options);
+				if (i < 0)
+					goto out;
+				i = remap8(i, map, TRUE);
+				unattend_xml_path = CreateUnattendXml(arch, i);
+				// Remember the user preferences for the current session.
+				// TODO: Do we want to save the current mask as a permanent setting?
+				unattend_xml_mask &= ~(remap8(0xff, map, TRUE));
+				unattend_xml_mask |= i;
 			}
 		} else if ( ((fs_type == FS_NTFS) && !HAS_WINDOWS(img_report) && !HAS_GRUB(img_report) && 
 					 (!HAS_SYSLINUX(img_report) || (SL_MAJOR(img_report.sl_version) <= 5)))
@@ -1541,11 +1704,10 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			// so ask the users if they want to write it as an ESP.
 			char* iso_image = lmprintf(MSG_036);
 			char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP") };
-			i = SelectionDialog(lmprintf(MSG_274, "ESP"), lmprintf(MSG_310), choices, 2);
+			i = SelectionDialog(BS_AUTORADIOBUTTON, lmprintf(MSG_274, "ESP"), lmprintf(MSG_310), choices, 2, 1);
 			if (i < 0)	// Cancel
 				goto out;
-			else if (i == 2)
-				write_as_esp = TRUE;
+			write_as_esp = (i & 2);
 		}
 
 		// If the selected target doesn't include BIOS, skip file downloads for GRUB/Syslinux
@@ -2192,7 +2354,7 @@ out:
 }
 
 #ifdef RUFUS_TEST
-extern BOOL RemoveWindows11Restrictions(char drive_letter);
+extern BOOL ApplyWindowsCustomization(char drive_letter);
 
 static DWORD WINAPI TestThread(LPVOID param)
 {
@@ -2203,7 +2365,7 @@ static DWORD WINAPI TestThread(LPVOID param)
 		ExitThread(1);
 	}
 	processing = TRUE;
-	RemoveWindows11Restrictions('B');
+	ApplyWindowsCustomization('B');
 	processing = FALSE;
 	ExitThread(0);
 }
@@ -2603,6 +2765,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			fs_type = (int)ComboBox_GetCurItemData(hFileSystem);
 			write_as_image = FALSE;
 			write_as_esp = FALSE;
+			enable_inplace = FALSE;
+			set_drives_offline = FALSE;
 			// Disable all controls except Cancel
 			EnableControls(FALSE, FALSE);
 			FormatStatus = 0;
@@ -3036,6 +3200,10 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		if (queued_hotplug_event)
 			SendMessage(hDlg, UM_MEDIA_CHANGE, 0, 0);
 		if (wParam == BOOTCHECK_CANCEL) {
+			if (unattend_xml_path != NULL) {
+				DeleteFileU(unattend_xml_path);
+				unattend_xml_path = NULL;
+			}
 			EnableControls(TRUE, FALSE);
 			break;
 		}
@@ -3046,6 +3214,10 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 	case UM_FORMAT_COMPLETED:
 		zero_drive = FALSE;
 		format_thread = NULL;
+		if (unattend_xml_path != NULL) {
+			DeleteFileU(unattend_xml_path);
+			unattend_xml_path = NULL;
+		}
 		// Stop the timer
 		KillTimer(hMainDialog, TID_APP_TIMER);
 		// Close the cancel MessageBox and Blocking notification if active
@@ -3866,7 +4038,7 @@ relaunch:
 			if ((msg.message == WM_SYSKEYDOWN) && (msg.wParam == 'Q')) {
 				enable_file_indexing = !enable_file_indexing;
 				WriteSettingBool(SETTING_ENABLE_FILE_INDEXING, enable_file_indexing);
-				PrintStatusTimeout(lmprintf(MSG_290), !enable_file_indexing);
+				PrintStatusTimeout(lmprintf(MSG_290), enable_file_indexing);
 				continue;
 			}
 			// Alt-R => Remove all the registry keys that may have been created by Rufus

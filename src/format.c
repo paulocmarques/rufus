@@ -71,9 +71,10 @@ extern const int nb_steps[FS_MAX];
 extern uint32_t dur_mins, dur_secs;
 extern uint32_t wim_nb_files, wim_proc_files, wim_extra_files;
 static int actual_fs_type, wintogo_index = -1, wininst_index = 0;
-extern BOOL force_large_fat32, enable_ntfs_compression, lock_drive, zero_drive, fast_zeroing, enable_file_indexing, write_as_image;
-extern BOOL use_vds, write_as_esp, is_vds_available;
+extern BOOL force_large_fat32, enable_ntfs_compression, lock_drive, zero_drive, fast_zeroing, enable_file_indexing;
+extern BOOL write_as_image, use_vds, write_as_esp, is_vds_available, enable_inplace, set_drives_offline;
 extern const grub_patch_t grub_patch[2];
+extern char* unattend_xml_path;
 uint8_t *grub2_buf = NULL, *sec_buf = NULL;
 long grub2_len;
 
@@ -1249,11 +1250,11 @@ out:
 // Returns -2 on user cancel, -1 on other error, >=0 on success.
 int SetWinToGoIndex(void)
 {
-	char *mounted_iso, *build, mounted_image_path[128];
+	char *mounted_iso, *val, mounted_image_path[128];
 	char xml_file[MAX_PATH] = "";
 	char *install_names[MAX_WININST];
 	StrArray version_name, version_index;
-	int i, build_nr = 0;
+	int i;
 	BOOL bNonStandard = FALSE;
 
 	// Sanity checks
@@ -1268,11 +1269,11 @@ int SetWinToGoIndex(void)
 	if (img_report.wininst_index > 1) {
 		for (i = 0; i < img_report.wininst_index; i++)
 			install_names[i] = &img_report.wininst_path[i][2];
-		wininst_index = SelectionDialog(lmprintf(MSG_130), lmprintf(MSG_131), install_names, img_report.wininst_index);
+		wininst_index = _log2(SelectionDialog(BS_AUTORADIOBUTTON, lmprintf(MSG_130),
+			lmprintf(MSG_131), install_names, img_report.wininst_index, 1));
 		if (wininst_index < 0)
 			return -2;
-		wininst_index--;
-		if ((wininst_index < 0) || (wininst_index >= MAX_WININST))
+		if (wininst_index >= MAX_WININST)
 			wininst_index = 0;
 	}
 
@@ -1323,30 +1324,44 @@ int SetWinToGoIndex(void)
 		uprintf("Warning: Nonstandard Windows image (missing <DISPLAYNAME> entries)");
 
 	if (i > 1)
-		i = SelectionDialog(lmprintf(MSG_291), lmprintf(MSG_292), version_name.String, i);
-	if (i < 0) {
+		// NB: _log2 returns -2 if SelectionDialog() returns negative (user cancelled)
+		i = _log2(SelectionDialog(BS_AUTORADIOBUTTON,
+			lmprintf(MSG_291), lmprintf(MSG_292), version_name.String, i, 1)) + 1;
+	if (i < 0)
 		wintogo_index = -2;	// Cancelled by the user
-	} else if (i == 0) {
+	else if (i == 0)
 		wintogo_index = 1;
-	} else {
+	else
 		wintogo_index = atoi(version_index.String[i - 1]);
-	}
 	if (i > 0) {
-		// Get the build version
-		build = get_token_data_file_indexed("BUILD", xml_file, i);
-		if (build != NULL)
-			build_nr = atoi(build);
-		free(build);
+		// Get the version data from the XML index
+		val = get_token_data_file_indexed("MAJOR", xml_file, i);
+		img_report.win_version.major = (uint16_t)safe_atoi(val);
+		free(val);
+		val = get_token_data_file_indexed("MINOR", xml_file, i);
+		img_report.win_version.minor = (uint16_t)safe_atoi(val);
+		free(val);
+		val = get_token_data_file_indexed("BUILD", xml_file, i);
+		img_report.win_version.build = (uint16_t)safe_atoi(val);
+		free(val);
+		val = get_token_data_file_indexed("SPBUILD", xml_file, i);
+		img_report.win_version.revision = (uint16_t)safe_atoi(val);
+		free(val);
+		if ((img_report.win_version.major == 10) && (img_report.win_version.build > 20000))
+			img_report.win_version.major = 11;
+		// If we couldn't obtain the major and build, we have a problem
+		if (img_report.win_version.major == 0 || img_report.win_version.build == 0)
+			uprintf("Warning: Could not obtain version information from XML index (Nonstandard Windows image?)");
 		uprintf("Will use '%s' (Build: %d, Index %s) for Windows To Go",
-			version_name.String[i - 1], build_nr, version_index.String[i - 1]);
+			version_name.String[i - 1], img_report.win_version.build, version_index.String[i - 1]);
 		// Need Windows 10 Creator Update or later for boot on REMOVABLE to work
-		if ((build_nr < 15000) && (SelectedDrive.MediaType != FixedMedia)) {
+		if ((img_report.win_version.build < 15000) && (SelectedDrive.MediaType != FixedMedia)) {
 			if (MessageBoxExU(hMainDialog, lmprintf(MSG_098), lmprintf(MSG_190),
 				MB_YESNO | MB_ICONWARNING | MB_IS_RTL, selected_langid) != IDYES)
 				wintogo_index = -2;
 		}
 		// Display a notice about WppRecorder.sys for 1809 ISOs
-		if (build_nr == 17763) {
+		if (img_report.win_version.build == 17763) {
 			notification_info more_info;
 			more_info.id = MORE_INFO_URL;
 			more_info.url = WPPRECORDER_MORE_INFO_URL;
@@ -1450,6 +1465,19 @@ static BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp)
 
 	UpdateProgressWithInfo(OP_FILE_COPY, MSG_267, wim_proc_files + 2 * wim_extra_files, wim_nb_files);
 
+	// Setting internal drives offline for Windows To Go is crucial if, for instance, you are using ReFS
+	// on Windows 10 (therefore ReFS v3.4) and don't want a Windows 11 To Go boot to automatically
+	// "upgrade" the ReFS version on all drives to v3.7, thereby preventing you from being able to mount
+	// those volumes back on Windows 10 ever again. Yes, I have been stung by this Microsoft bullshit!
+	// See: https://gist.github.com/0xbadfca11/da0598e47dd643d933dc#Mountability
+	if (set_drives_offline) {
+		uprintf("Setting the target's internal drives offline using command:");
+		// This applies the "offlineServicing" section of the unattend.xml (while ignoring the other sections)
+		static_sprintf(cmd, "dism /Image:%s\\ /Apply-Unattend:%s", drive_name, unattend_xml_path);
+		uprintf(cmd);
+		RunCommand(cmd, NULL, usb_debug);
+	}
+
 	uprintf("Disabling use of the Windows Recovery Environment using command:");
 	static_sprintf(cmd, "%s\\bcdedit.exe /store %s\\EFI\\Microsoft\\Boot\\BCD /set {default} recoveryenabled no",
 		sysnative_dir, (use_esp) ? ms_efi : drive_name);
@@ -1467,80 +1495,69 @@ static BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp)
 }
 
 /*
- * Edit sources/boot.wim registry to remove Windows 11 install restrictions
+ * Add unattend.xml to 'sources\boot.wim' (install) or 'Windows\Panther\' (Windows To Go)
  */
-BOOL RemoveWindows11Restrictions(char drive_letter)
+BOOL ApplyWindowsCustomization(char drive_letter, BOOL windows_to_go)
 {
-	BOOL r = FALSE, is_hive_mounted = FALSE;
-	int i;
+	BOOL r = FALSE;
 	const int wim_index = 2;
-	const char* offline_hive_name = "RUFUS_OFFLINE_HIVE";
-	const char* key_name[] = { "BypassTPMCheck", "BypassSecureBootCheck" };
-	char boot_wim_path[] = "#:\\sources\\boot.wim", key_path[64];
-	char* mount_path = NULL;
-	char path[MAX_PATH];
-	HKEY hKey = NULL, hSubKey = NULL;
-	LSTATUS status;
-	DWORD dwDisp, dwVal = 1;
+	char boot_wim_path[] = "?:\\sources\\boot.wim";
+	char appraiserres_dll_src[] = "?:\\sources\\appraiserres.dll";
+	char appraiserres_dll_dst[] = "?:\\sources\\appraiserres.bak";
+	char *mount_path = NULL, path[MAX_PATH];
 
-	boot_wim_path[0] = drive_letter;
-
-	UpdateProgressWithInfoForce(OP_PATCH, MSG_324, 0, PATCH_PROGRESS_TOTAL);
-	uprintf("Mounting '%s'...", boot_wim_path);
-
-	mount_path = WimMountImage(boot_wim_path, wim_index);
-	if (mount_path == NULL)
-		goto out;
-
-	static_sprintf(path, "%s\\Windows\\System32\\config\\SYSTEM", mount_path);
-	if (!MountRegistryHive(HKEY_LOCAL_MACHINE, offline_hive_name, path))
-		goto out;
-	UpdateProgressWithInfoForce(OP_PATCH, MSG_324, 102, PATCH_PROGRESS_TOTAL);
-	is_hive_mounted = TRUE;
-
-	static_sprintf(key_path, "%s\\Setup", offline_hive_name);
-	status = RegOpenKeyExA(HKEY_LOCAL_MACHINE, key_path, 0, KEY_READ | KEY_CREATE_SUB_KEY, &hKey);
-	if (status != ERROR_SUCCESS) {
-		SetLastError(status);
-		uprintf("Could not open 'HKLM\\SYSTEM\\Setup' registry key: %s", WindowsErrorString());
-		goto out;
-	}
-
-	status = RegCreateKeyExA(hKey, "LabConfig", 0, NULL, 0,
-		KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_CREATE_SUB_KEY, NULL, &hSubKey, &dwDisp);
-	if (status != ERROR_SUCCESS) {
-		SetLastError(status);
-		uprintf("Could not create 'HKLM\\SYSTEM\\Setup\\LabConfig' registry key: %s", WindowsErrorString());
-		goto out;
-	}
-
-	for (i = 0; i < ARRAYSIZE(key_name); i++) {
-		status = RegSetValueExA(hSubKey, key_name[i], 0, REG_DWORD, (LPBYTE)&dwVal, sizeof(DWORD));
-		if (status != ERROR_SUCCESS) {
-			SetLastError(status);
-			uprintf("Could not set 'HKLM\\SYSTEM\\Setup\\LabConfig\\%s' registry key: %s",
-				key_name[i], WindowsErrorString());
+	assert(unattend_xml_path != NULL);
+	uprintf("Applying Windows customization:");
+	if (windows_to_go) {
+		static_sprintf(path, "%c:\\Windows\\Panther", drive_letter);
+		if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+			uprintf("Could not create '%s' : %s", path, WindowsErrorString());
 			goto out;
 		}
-		uprintf("Created 'HKLM\\SYSTEM\\Setup\\LabConfig\\%s' registry key", key_name[i]);
+		static_sprintf(path, "%c:\\Windows\\Panther\\unattend.xml", drive_letter);
+		if (!CopyFileA(unattend_xml_path, path, TRUE)) {
+			uprintf("Could not create '%s' : %s", path, WindowsErrorString());
+			goto out;
+		}
+		uprintf("Added '%s'", path);
+	} else {
+		boot_wim_path[0] = drive_letter;
+		if (enable_inplace) {
+			// Create a backup of sources\appraiserres.dll and then create an empty file to
+			// allow in-place upgrades without TPM/SB. Note that we need to create an empty,
+			// appraiserres.dll otherwise setup.exe extracts its own.
+			appraiserres_dll_src[0] = drive_letter;
+			appraiserres_dll_dst[0] = drive_letter;
+			if (!MoveFileExU(appraiserres_dll_src, appraiserres_dll_dst, MOVEFILE_REPLACE_EXISTING))
+				uprintf("Could not rename '%s': %s", appraiserres_dll_src, WindowsErrorString());
+			else
+				CloseHandle(CreateFileU(appraiserres_dll_src, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+					NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
+			uprintf("Renamed '%s' → '%s'", appraiserres_dll_src, appraiserres_dll_dst);
+		}
+
+		UpdateProgressWithInfoForce(OP_PATCH, MSG_325, 0, PATCH_PROGRESS_TOTAL);
+		uprintf("Mounting '%s'...", boot_wim_path);
+		mount_path = WimMountImage(boot_wim_path, wim_index);
+		if (mount_path == NULL)
+			goto out;
+
+		static_sprintf(path, "%s\\Autounattend.xml", mount_path);
+		if (!CopyFileU(unattend_xml_path, path, TRUE)) {
+			uprintf("Could not create boot.wim 'Autounattend.xml': %s", WindowsErrorString());
+			goto out;
+		}
+		uprintf("Added 'Autounattend.xml' to '%s'", boot_wim_path);
+		UpdateProgressWithInfoForce(OP_PATCH, MSG_325, 103, PATCH_PROGRESS_TOTAL);
 	}
-	UpdateProgressWithInfoForce(OP_PATCH, MSG_324, 103, PATCH_PROGRESS_TOTAL);
 	r = TRUE;
 
 out:
-	if (hSubKey != NULL)
-		RegCloseKey(hSubKey);
-	if (hKey != NULL)
-		RegCloseKey(hKey);
-	if (is_hive_mounted) {
-		UnmountRegistryHive(HKEY_LOCAL_MACHINE, offline_hive_name);
-		UpdateProgressWithInfoForce(OP_PATCH, MSG_324, 104, PATCH_PROGRESS_TOTAL);
-	}
 	if (mount_path) {
 		uprintf("Unmounting '%s'...", boot_wim_path, wim_index);
 		WimUnmountImage(boot_wim_path, wim_index);
+		UpdateProgressWithInfo(OP_PATCH, MSG_325, PATCH_PROGRESS_TOTAL, PATCH_PROGRESS_TOTAL);
 	}
-	UpdateProgressWithInfo(OP_PATCH, MSG_324, PATCH_PROGRESS_TOTAL, PATCH_PROGRESS_TOTAL);
 	free(mount_path);
 	return r;
 }
@@ -1899,8 +1916,6 @@ DWORD WINAPI FormatThread(void* param)
 	char drive_letters[27], fs_name[32], label[64];
 	char logfile[MAX_PATH], *userdir;
 	char efi_dst[] = "?:\\efi\\boot\\bootx64.efi";
-	char appraiserres_dll_src[] = "?:\\sources\\appraiserres.dll";
-	char appraiserres_dll_dst[] = "?:\\sources\\appraiserres.bak";
 	char kolibri_dst[] = "?:\\MTLD_F32";
 	char grub4dos_dst[] = "?:\\grldr";
 
@@ -2335,6 +2350,10 @@ DWORD WINAPI FormatThread(void* param)
 						FormatStatus = ERROR_SEVERITY_ERROR | FAC(FACILITY_STORAGE) | APPERR(ERROR_ISO_EXTRACT);
 					goto out;
 				}
+				if (unattend_xml_path != NULL) {
+					if (!ApplyWindowsCustomization(drive_name[0], TRUE))
+						FormatStatus = ERROR_SEVERITY_ERROR | FAC(FACILITY_STORAGE) | APPERR(ERROR_CANT_PATCH);
+				}
 			} else {
 				assert(!img_report.is_windows_img);
 				if (!ExtractISO(image_path, drive_name, FALSE)) {
@@ -2373,20 +2392,8 @@ DWORD WINAPI FormatThread(void* param)
 					if (!SetupWinPE(drive_name[0]))
 						FormatStatus = ERROR_SEVERITY_ERROR|FAC(FACILITY_STORAGE)|APPERR(ERROR_CANT_PATCH);
 				}
-				if (ComboBox_GetCurItemData(hImageOption) == IMOP_WIN_EXTENDED) {
-					// Create a backup of sources\appraiserres.dll and then create an empty file to
-					// allow in-place upgrades without TPM/SB. Note that we need to create an empty,
-					// appraiserres.dll otherwise setup.exe extracts its own.
-					appraiserres_dll_src[0] = drive_name[0];
-					appraiserres_dll_dst[0] = drive_name[0];
-					uprintf("Renaming: '%s' → '%s'", appraiserres_dll_src, appraiserres_dll_dst);
-					if (!MoveFileExU(appraiserres_dll_src, appraiserres_dll_dst, MOVEFILE_REPLACE_EXISTING))
-						uprintf("  Rename failed: %s", WindowsErrorString());
-					else
-						CloseHandle(CreateFileU(appraiserres_dll_src, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
-							NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
-					// Now patch for boot-time TPM/SB checks.
-					if (!RemoveWindows11Restrictions(drive_name[0]))
+				if (unattend_xml_path != NULL) {
+					if (!ApplyWindowsCustomization(drive_name[0], FALSE))
 						FormatStatus = ERROR_SEVERITY_ERROR | FAC(FACILITY_STORAGE) | APPERR(ERROR_CANT_PATCH);
 				}
 			}
