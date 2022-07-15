@@ -125,6 +125,7 @@ static uint8_t joliet_level = 0;
 static uint64_t total_blocks, nb_blocks;
 static BOOL scan_only = FALSE;
 static StrArray config_path, isolinux_path, modified_path;
+static char symlinked_syslinux[MAX_PATH];
 
 // Ensure filenames do not contain invalid FAT32 or NTFS characters
 static __inline char* sanitize_filename(char* filename, BOOL* is_identical)
@@ -327,15 +328,14 @@ static BOOL check_iso_props(const char* psz_dirname, int64_t file_length, const 
 static void fix_config(const char* psz_fullpath, const char* psz_path, const char* psz_basename, EXTRACT_PROPS* props)
 {
 	BOOL modified = FALSE;
-	size_t i, nul_pos;
+	size_t nul_pos;
 	char *iso_label = NULL, *usb_label = NULL, *src, *dst;
 
-	nul_pos = safe_strlen(psz_fullpath);
 	src = safe_strdup(psz_fullpath);
 	if (src == NULL)
 		return;
-	for (i=0; i<nul_pos; i++)
-		if (src[i] == '/') src[i] = '\\';
+	nul_pos = strlen(src);
+	to_windows_path(src);
 
 	// Add persistence to the kernel options
 	if ((boot_type == BT_IMAGE) && HAS_PERSISTENCE(img_report) && persistence_size) {
@@ -436,25 +436,21 @@ static void fix_config(const char* psz_fullpath, const char* psz_path, const cha
 
 static void print_extracted_file(char* psz_fullpath, uint64_t file_length)
 {
-	size_t i, nul_pos;
+	size_t nul_pos;
 
 	if (psz_fullpath == NULL)
 		return;
 	// Replace slashes with backslashes and append the size to the path for UI display
+	to_windows_path(psz_fullpath);
 	nul_pos = strlen(psz_fullpath);
-	for (i = 0; i < nul_pos; i++)
-		if (psz_fullpath[i] == '/')
-			psz_fullpath[i] = '\\';
 	safe_sprintf(&psz_fullpath[nul_pos], 24, " (%s)", SizeToHumanReadable(file_length, TRUE, FALSE));
 	uprintf("Extracting: %s\n", psz_fullpath);
 	safe_sprintf(&psz_fullpath[nul_pos], 24, " (%s)", SizeToHumanReadable(file_length, FALSE, FALSE));
 	PrintStatus(0, MSG_000, psz_fullpath);	// MSG_000 is "%s"
-	// ISO9660 cannot handle backslashes
-	for (i = 0; i < nul_pos; i++)
-		if (psz_fullpath[i] == '\\')
-			psz_fullpath[i] = '/';
 	// Remove the appended size for extraction
 	psz_fullpath[nul_pos] = 0;
+	// ISO9660 cannot handle backslashes
+	to_unix_path(psz_fullpath);
 }
 
 static void alt_print_extracted_file(const char* psz_fullpath, uint64_t file_length)
@@ -789,8 +785,15 @@ static int iso_extract_files(iso9660_t* p_iso, const char *psz_path)
 			if (!is_identical)
 				uprintf("  File name sanitized to '%s'", psz_sanpath);
 			if (is_symlink) {
-				if (file_length == 0)
-					uprintf("  Ignoring Rock Ridge symbolic link to '%s'", p_statbuf->rr.psz_symlink);
+				if (file_length == 0) {
+					// Special handling for ISOs that have a syslinux → isolinux symbolic link (e.g. Knoppix)
+					if ((safe_stricmp(p_statbuf->filename, "syslinux") == 0) &&
+						(safe_stricmp(p_statbuf->rr.psz_symlink, "isolinux") == 0)) {
+						static_strcpy(symlinked_syslinux, psz_fullpath);
+						uprintf("  Found Rock Ridge symbolic link to '%s'", p_statbuf->rr.psz_symlink);
+					} else
+						uprintf("  Ignoring Rock Ridge symbolic link to '%s'", p_statbuf->rr.psz_symlink);
+				}
 				safe_free(p_statbuf->rr.psz_symlink);
 			}
 			file_handle = CreatePreallocatedFile(psz_sanpath, GENERIC_READ | GENERIC_WRITE,
@@ -912,6 +915,7 @@ BOOL ExtractISO(const char* src_iso, const char* dest_dir, BOOL scan)
 		}
 		nb_blocks = 0;
 		iso_blocking_status = 0;
+		symlinked_syslinux[0] = 0;
 		StrArrayCreate(&modified_path, 8);
 	}
 
@@ -1216,6 +1220,42 @@ out:
 			}
 			if (fd != NULL)
 				fclose(fd);
+			// Workaround needed for Knoppix that has a /boot/syslinux that links to /boot/isolinux/
+			// with EFI Syslinux trying to read /boot/syslinux/syslnx[32|64].cfg as the config file.
+			if (symlinked_syslinux[0] != 0) {
+				static const char* efi_cfg_name[] = { "syslnx32.cfg", "syslnx64.cfg" };
+				size_t len = strlen(symlinked_syslinux);
+				char isolinux_dir[MAX_PATH];
+				static_strcpy(isolinux_dir, symlinked_syslinux);
+				assert(len > 8);
+				// ".../syslinux" -> ".../isolinux"
+				isolinux_dir[len - 8] = 'i';
+				isolinux_dir[len - 7] = 's';
+				isolinux_dir[len - 6] = 'o';
+				// Delete the empty syslinux symbolic link remnant and replace it with a syslinux/ dir
+				DeleteFileA(symlinked_syslinux);
+				CreateDirectoryA(symlinked_syslinux, NULL);
+				// Now add the relevant config files that link back to the ones in isolinux/
+				for (i = 0; i < ARRAYSIZE(efi_cfg_name); i++) {
+					static_sprintf(path, "%s/%s", isolinux_dir, efi_cfg_name[i]);
+					if (!PathFileExistsA(path))
+						continue;
+					static_sprintf(path, "%s/%s", symlinked_syslinux, efi_cfg_name[i]);
+					fd = fopen(path, "w");
+					if (fd == NULL) {
+						uprintf("Unable to create %s - booting from USB may not work", path);
+						r = 1;
+						continue;
+					}
+					static_sprintf(path, "%s/%s", isolinux_dir, efi_cfg_name[i]);
+					fprintf(fd, "DEFAULT loadconfig\n\nLABEL loadconfig\n  CONFIG %s\n  APPEND %s\n", &path[2], &isolinux_dir[2]);
+					fclose(fd);
+					to_windows_path(symlinked_syslinux);
+					uprintf("Created: %s\\%s → %s", symlinked_syslinux, efi_cfg_name[i], &path[2]);
+					to_unix_path(symlinked_syslinux);
+					fd = NULL;
+				}
+			}
 		} else if (HAS_BOOTMGR(img_report) && enable_ntfs_compression) {
 			// bootmgr might need to be uncompressed: https://github.com/pbatard/rufus/issues/1381
 			RunCommand("compact /u bootmgr* efi/boot/*.efi", dest_dir, TRUE);
@@ -1341,7 +1381,7 @@ out:
 
 uint32_t GetInstallWimVersion(const char* iso)
 {
-	char *wim_path = NULL, *p, buf[UDF_BLOCKSIZE] = { 0 };
+	char *wim_path = NULL, buf[UDF_BLOCKSIZE] = { 0 };
 	uint32_t* wim_header = (uint32_t*)buf, r = 0xffffffff;
 	iso9660_t* p_iso = NULL;
 	udf_t* p_udf = NULL;
@@ -1353,8 +1393,7 @@ uint32_t GetInstallWimVersion(const char* iso)
 		goto out;
 	// UDF indiscriminately accepts slash or backslash delimiters,
 	// but ISO-9660 requires slash
-	for (p = wim_path; *p != 0; p++)
-		if (*p == '\\') *p = '/';
+	to_unix_path(wim_path);
 
 	// First try to open as UDF - fallback to ISO if it failed
 	p_udf = udf_open(iso);
