@@ -333,6 +333,7 @@ enum checksum_type {
 #define HAS_WINPE(r)        (((r.winpe & WINPE_I386) == WINPE_I386)||((r.winpe & WINPE_AMD64) == WINPE_AMD64)||((r.winpe & WINPE_MININT) == WINPE_MININT))
 #define HAS_WINDOWS(r)      (HAS_BOOTMGR(r) || (r.uses_minint) || HAS_WINPE(r))
 #define HAS_WIN7_EFI(r)     ((r.has_efi == 1) && HAS_WININST(r))
+#define IS_WINDOWS_1X(r)    (r.has_bootmgr_efi && (r.win_version.major >= 10))
 #define IS_WINDOWS_11(r)    (r.has_bootmgr_efi && (r.win_version.major >= 11))
 #define HAS_EFI_IMG(r)      (r.efi_img_path[0] != 0)
 #define IS_DD_BOOTABLE(r)   (r.is_bootable_img > 0)
@@ -498,20 +499,23 @@ enum ArchType {
 	ARCH_MAX
 };
 
-// Windows User Experience (unattend.xml) options
-#define UNATTEND_SECUREBOOT_TPM_MASK        0x00001
-#define UNATTEND_MINRAM_MINDISK_MASK        0x00002
-#define UNATTEND_NO_ONLINE_ACCOUNT_MASK     0x00004
-#define UNATTEND_NO_DATA_COLLECTION_MASK    0x00008
+// Windows User Experience (unattend.xml) flags and masks
+#define UNATTEND_SECUREBOOT_TPM_MINRAM      0x00001
+#define UNATTEND_NO_ONLINE_ACCOUNT          0x00004
+#define UNATTEND_NO_DATA_COLLECTION         0x00008
 #define UNATTEND_OFFLINE_INTERNAL_DRIVES    0x00010
-#define UNATTEND_DEFAULT_MASK               0x0001F
+#define UNATTEND_DUPLICATE_LOCALE           0x00020
+#define UNATTEND_DUPLICATE_USER             0x00040
+#define UNATTEND_DEFAULT_MASK               0x0007F
 #define UNATTEND_WINDOWS_TO_GO              0x10000		// Special flag for Windows To Go
 
-#define UNATTEND_WINPE_SETUP_MASK           (UNATTEND_SECUREBOOT_TPM_MASK | UNATTEND_MINRAM_MINDISK_MASK)
-#define UNATTEND_SPECIALIZE_DEPLOYMENT_MASK (UNATTEND_NO_ONLINE_ACCOUNT_MASK)
-#define UNATTEND_OOBE_SHELL_SETUP           (UNATTEND_NO_DATA_COLLECTION_MASK)
-#define UNATTEND_OFFLINE_SERVICING          (UNATTEND_OFFLINE_INTERNAL_DRIVES)
-#define UNATTEND_DEFAULT_SELECTION          (UNATTEND_SECUREBOOT_TPM_MASK | UNATTEND_NO_ONLINE_ACCOUNT_MASK | UNATTEND_OFFLINE_INTERNAL_DRIVES)
+#define UNATTEND_WINPE_SETUP_MASK           (UNATTEND_SECUREBOOT_TPM_MINRAM)
+#define UNATTEND_SPECIALIZE_DEPLOYMENT_MASK (UNATTEND_NO_ONLINE_ACCOUNT)
+#define UNATTEND_OOBE_SHELL_SETUP_MASK      (UNATTEND_NO_DATA_COLLECTION | UNATTEND_DUPLICATE_USER)
+#define UNATTEND_OOBE_INTERNATIONAL_MASK    (UNATTEND_DUPLICATE_LOCALE)
+#define UNATTEND_OOBE_MASK                  (UNATTEND_OOBE_SHELL_SETUP_MASK | UNATTEND_OOBE_INTERNATIONAL_MASK)
+#define UNATTEND_OFFLINE_SERVICING_MASK     (UNATTEND_OFFLINE_INTERNAL_DRIVES)
+#define UNATTEND_DEFAULT_SELECTION_MASK     (UNATTEND_SECUREBOOT_TPM_MINRAM | UNATTEND_NO_ONLINE_ACCOUNT | UNATTEND_OFFLINE_INTERNAL_DRIVES)
 
 /*
  * Globals
@@ -634,7 +638,6 @@ extern char* WimMountImage(const char* image, int index);
 extern BOOL WimUnmountImage(const char* image, int index);
 extern int8_t IsBootableImage(const char* path);
 extern BOOL AppendVHDFooter(const char* vhd_path);
-extern int SetWinToGoIndex(void);
 extern int IsHDD(DWORD DriveIndex, uint16_t vid, uint16_t pid, const char* strid);
 extern char* GetSignatureName(const char* path, const char* country_code, BOOL bSilent);
 extern uint64_t GetSignatureTimeStamp(const char* path);
@@ -652,7 +655,7 @@ extern BOOL IsBufferInDB(const unsigned char* buf, const size_t len);
 #define printbitslz(x) _printbits(sizeof(x), &x, 1)
 extern char* _printbits(size_t const size, void const * const ptr, int leading_zeroes);
 extern BOOL IsCurrentProcessElevated(void);
-extern char* GetCurrentMUI(void);
+extern char* ToLocaleName(DWORD lang_id);
 extern void SetAlertPromptMessages(void);
 extern BOOL SetAlertPromptHook(void);
 extern void ClrAlertPromptHook(void);
@@ -667,7 +670,6 @@ extern HANDLE CreatePreallocatedFile(const char* lpFileName, DWORD dwDesiredAcce
 	DWORD dwFlagsAndAttributes, LONGLONG fileSize);
 #define GetTextWidth(hDlg, id) GetTextSize(GetDlgItem(hDlg, id), NULL).cx
 
-DWORD WINAPI FormatThread(void* param);
 DWORD WINAPI SaveImageThread(void* param);
 DWORD WINAPI SumThread(void* param);
 

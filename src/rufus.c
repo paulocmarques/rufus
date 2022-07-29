@@ -39,6 +39,7 @@
 #include <delayimp.h>
 
 #include "rufus.h"
+#include "format.h"
 #include "missing.h"
 #include "resource.h"
 #include "msapi_utf8.h"
@@ -46,6 +47,7 @@
 
 #include "ui.h"
 #include "re.h"
+#include "wue.h"
 #include "drive.h"
 #include "settings.h"
 #include "bled/bled.h"
@@ -78,7 +80,7 @@ static BOOL app_changed_label = FALSE;
 static BOOL allowed_filesystem[FS_MAX] = { 0 };
 static int64_t last_iso_blocking_status;
 static int selected_pt = -1, selected_fs = FS_UNKNOWN, preselected_fs = FS_UNKNOWN;
-static int image_index = 0, select_index = 0, unattend_xml_mask = UNATTEND_DEFAULT_SELECTION;
+static int image_index = 0, select_index = 0;
 static RECT relaunch_rc = { -65536, -65536, 0, 0};
 static UINT uMBRChecked = BST_UNCHECKED;
 static HANDLE format_thread = NULL;
@@ -125,7 +127,7 @@ BOOL write_as_image = FALSE, write_as_esp = FALSE, use_vds = FALSE, ignore_boot_
 BOOL appstore_version = FALSE, is_vds_available = TRUE;
 float fScale = 1.0f;
 int dialog_showing = 0, selection_default = BT_IMAGE, persistence_unit_selection = -1, imop_win_sel = 0;
-int default_fs, fs_type, boot_type, partition_type, target_type, unattend_xml_selection = 0;
+int default_fs, fs_type, boot_type, partition_type, target_type;
 int force_update = 0, default_thread_priority = THREAD_PRIORITY_ABOVE_NORMAL;
 char szFolderPath[MAX_PATH], app_dir[MAX_PATH], system_dir[MAX_PATH], temp_dir[MAX_PATH], sysnative_dir[MAX_PATH];
 char app_data_dir[MAX_PATH], user_dir[MAX_PATH];
@@ -133,12 +135,11 @@ char embedded_sl_version_str[2][12] = { "?.??", "?.??" };
 char embedded_sl_version_ext[2][32];
 char ClusterSizeLabel[MAX_CLUSTER_SIZES][64];
 char msgbox[1024], msgbox_title[32], *ini_file = NULL, *image_path = NULL, *short_image_path;
-char *archive_path = NULL, image_option_txt[128], *fido_url = NULL, *unattend_xml_path = NULL;
+char *archive_path = NULL, image_option_txt[128], *fido_url = NULL;
 StrArray BlockingProcess, ImageList;
 // Number of steps for each FS for FCC_STRUCTURE_PROGRESS
 const int nb_steps[FS_MAX] = { 5, 5, 12, 1, 10, 1, 1, 1, 1 };
 const char* flash_type[BADLOCKS_PATTERN_TYPES] = { "SLC", "MLC", "TLC" };
-const char* bypass_name[4] = { "BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassStorageCheck" };
 RUFUS_DRIVE rufus_drive[MAX_DRIVES] = { 0 };
 
 // TODO: Remember to update copyright year in stdlg's AboutCallback() WM_INITDIALOG,
@@ -1175,7 +1176,12 @@ static void UpdateImage(BOOL update_image_option_only)
 	IGNORE_RETVAL(ComboBox_SetCurSel(hImageOption, imop_win_sel));
 }
 
-static uint8_t FindArch(const char* filename)
+/// <summary>
+/// Parse a PE executable file and return its CPU architecture.
+/// </summary>
+/// <param name="path">The path of the PE executable to parse.</param>
+/// <returns>An enum ArchType value (as defined in rufus.h)</returns>
+static uint8_t FindArch(const char* path)
 {
 	uint8_t ret = ARCH_UNKNOWN;
 	HANDLE hFile = NULL, hFileMapping = NULL;
@@ -1184,9 +1190,9 @@ static uint8_t FindArch(const char* filename)
 	// PE headers, so we don't need to care about using PIMAGE_NT_HEADERS[32|64]
 	PIMAGE_NT_HEADERS pImageNTHeader = NULL;
 
-	hFile = CreateFileU(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	hFile = CreateFileU(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
 	if (hFile == NULL) {
-		uprintf("FindArch: Could not open file '%s': %s", filename, WindowsErrorString());
+		uprintf("FindArch: Could not open file '%s': %s", path, WindowsErrorString());
 		return 0;
 	}
 
@@ -1248,110 +1254,6 @@ out:
 	safe_closehandle(hFile);
 	assert(ret < ARCH_MAX);
 	return ret;
-}
-
-static char* CreateUnattendXml(int arch, int mask)
-{
-	static char path[MAX_PATH];
-	FILE* fd;
-	int i, order;
-	const char* xml_arch_names[5] = { "x86", "amd64", "arm", "arm64" };
-	unattend_xml_selection = mask;
-	if (arch < ARCH_X86_32 || arch >= ARCH_ARM_64 || mask == 0)
-		return NULL;
-	arch--;
-	// coverity[swapped_arguments]
-	if (GetTempFileNameU(temp_dir, APPLICATION_NAME, 0, path) == 0)
-		return NULL;
-	fd = fopen(path, "w");
-	if (fd == NULL)
-		return NULL;
-
-	fprintf(fd, "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
-	fprintf(fd, "<unattend xmlns=\"urn:schemas-microsoft-com:unattend\">\n");
-
-	// This part produces the unbecoming display of a command prompt window during initial setup as well
-	// as alters the layout and options of the initial Windows installer screens, which may scare users.
-	// So, in format.c, we'll try to insert the registry keys directly and drop this section. However,
-	// because Microsoft prevents Store apps from editing an offline registry, we do need this fallback.
-	if (mask & UNATTEND_WINPE_SETUP_MASK) {
-		order = 1;
-		fprintf(fd, "  <settings pass=\"windowsPE\">\n");
-		fprintf(fd, "    <component name=\"Microsoft-Windows-Setup\" processorArchitecture=\"%s\" language=\"neutral\" "
-			"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
-			"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
-		// WinPE will complain if we don't provide a product key. *Any* product key. This is soooo idiotic...
-		fprintf(fd, "      <UserData>\n");
-		fprintf(fd, "        <ProductKey>\n");
-		fprintf(fd, "          <Key />\n");
-		fprintf(fd, "        </ProductKey>\n");
-		fprintf(fd, "      </UserData>\n");
-		fprintf(fd, "      <RunSynchronous>\n");
-		for (i = 0; i < ARRAYSIZE(bypass_name); i++) {
-			if (!(mask & (1 << (i/2))))
-				continue;
-			fprintf(fd, "        <RunSynchronousCommand wcm:action=\"add\">\n");
-			fprintf(fd, "          <Order>%d</Order>\n", order++);
-			fprintf(fd, "          <Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v %s /t REG_DWORD /d 1 /f</Path>\n", bypass_name[i]);
-			fprintf(fd, "        </RunSynchronousCommand>\n");
-		}
-		fprintf(fd, "      </RunSynchronous>\n");
-		fprintf(fd, "    </component>\n");
-		fprintf(fd, "  </settings>\n");
-	}
-
-	if (mask & UNATTEND_SPECIALIZE_DEPLOYMENT_MASK) {
-		order = 1;
-		fprintf(fd, "  <settings pass=\"specialize\">\n");
-		fprintf(fd, "    <component name=\"Microsoft-Windows-Deployment\" processorArchitecture=\"%s\" language=\"neutral\" "
-			"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
-			"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
-		fprintf(fd, "      <RunSynchronous>\n");
-		// This part was picked from https://github.com/AveYo/MediaCreationTool.bat/blob/main/bypass11/AutoUnattend.xml
-		if (mask & UNATTEND_NO_ONLINE_ACCOUNT_MASK) {
-			fprintf(fd, "        <RunSynchronousCommand wcm:action=\"add\">\n");
-			fprintf(fd, "          <Order>%d</Order>\n", order++);
-			fprintf(fd, "          <Path>reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>\n");
-			fprintf(fd, "        </RunSynchronousCommand>\n");
-		}
-		fprintf(fd, "      </RunSynchronous>\n");
-		fprintf(fd, "    </component>\n");
-		fprintf(fd, "  </settings>\n");
-	}
-
-	if (mask & UNATTEND_OOBE_SHELL_SETUP) {
-		order = 1;
-		fprintf(fd, "  <settings pass=\"oobeSystem\">\n");
-		fprintf(fd, "    <component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"%s\" language=\"neutral\" "
-			"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
-			"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
-		// https://docs.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-oobe-protectyourpc
-		// It is really super insidous of Microsoft to call this option "ProtectYourPC", when it's really only about
-		// data collection. But of course, if it was called "AllowDataCollection", everyone would turn it off...
-		if (mask & UNATTEND_NO_DATA_COLLECTION_MASK) {
-			fprintf(fd, "      <OOBE>\n");
-			fprintf(fd, "        <ProtectYourPC>3</ProtectYourPC>\n");
-			fprintf(fd, "      </OOBE>\n");
-		}
-		fprintf(fd, "    </component>\n");
-		fprintf(fd, "  </settings>\n");
-	}
-
-	if (mask & UNATTEND_OFFLINE_SERVICING) {
-		fprintf(fd, "  <settings pass=\"offlineServicing\">\n");
-		if (mask & UNATTEND_OFFLINE_INTERNAL_DRIVES) {
-			fprintf(fd, "    <component name=\"Microsoft-Windows-PartitionManager\" processorArchitecture=\"%s\" language=\"neutral\" "
-				"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
-				"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
-			fprintf(fd, "      <SanPolicy>4</SanPolicy>\n");
-			fprintf(fd, "    </component>\n");
-		}
-		fprintf(fd, "  </settings>\n");
-	}
-
-	fprintf(fd, "</unattend>\n");
-	fclose(fd);
-	return path;
 }
 
 // The scanning process can be blocking for message processing => use a thread
@@ -1603,27 +1505,31 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			default:
 				break;
 			}
-			if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_11(img_report)) {
+			if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_1X(img_report)) {
 				StrArray options;
 				int arch = _log2(img_report.has_efi >> 1);
 				uint8_t map[8] = { 0 }, b = 1;
 				StrArrayCreate(&options, 2);
 				if (img_report.win_version.build >= 22500) {
 					StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
-					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT_MASK);
+					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
 				}
 				StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
-				MAP_BIT(UNATTEND_NO_DATA_COLLECTION_MASK);
+				MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
 				StrArrayAdd(&options, lmprintf(MSG_332), TRUE);
 				MAP_BIT(UNATTEND_OFFLINE_INTERNAL_DRIVES);
-				i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_326), lmprintf(MSG_327),
+				StrArrayAdd(&options, lmprintf(MSG_333), TRUE);
+				MAP_BIT(UNATTEND_DUPLICATE_USER);
+				StrArrayAdd(&options, lmprintf(MSG_334), TRUE);
+				MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
+				i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_327), lmprintf(MSG_328),
 					options.String, options.Index, remap8(unattend_xml_mask, map, FALSE));
 				StrArrayDestroy(&options);
 				if (i < 0)
 					goto out;
 				// Remap i to the correct bit positions before calling CreateUnattendXml()
 				i = remap8(i, map, TRUE);
-				unattend_xml_path = CreateUnattendXml(arch, i);
+				unattend_xml_path = CreateUnattendXml(arch, i | UNATTEND_WINDOWS_TO_GO);
 				// Keep the bits we didn't process
 				unattend_xml_mask &= ~(remap8(0xff, map, TRUE));
 				// And add back the bits we did process
@@ -1660,22 +1566,26 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			MessageBoxExU(hMainDialog, lmprintf(MSG_100), lmprintf(MSG_099), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
 			goto out;
 		}
-		if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_11(img_report) && (!is_windows_to_go)) {
+		if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_1X(img_report) && (!is_windows_to_go)) {
 			StrArray options;
 			int arch = _log2(img_report.has_efi >> 1);
 			uint8_t map[8] = { 0 }, b = 1;
 			StrArrayCreate(&options, 4);
-			StrArrayAdd(&options, lmprintf(MSG_328), TRUE);
-			MAP_BIT(UNATTEND_SECUREBOOT_TPM_MASK);
-			StrArrayAdd(&options, lmprintf(MSG_329), TRUE);
-			MAP_BIT(UNATTEND_MINRAM_MINDISK_MASK);
+			if (IS_WINDOWS_11(img_report)) {
+				StrArrayAdd(&options, lmprintf(MSG_329), TRUE);
+				MAP_BIT(UNATTEND_SECUREBOOT_TPM_MINRAM);
+			}
 			if (img_report.win_version.build >= 22500) {
 				StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
-				MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT_MASK);
+				MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
 			}
 			StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
-			MAP_BIT(UNATTEND_NO_DATA_COLLECTION_MASK);
-			i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_326), lmprintf(MSG_327),
+			MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
+			StrArrayAdd(&options, lmprintf(MSG_333), TRUE);
+			MAP_BIT(UNATTEND_DUPLICATE_USER);
+			StrArrayAdd(&options, lmprintf(MSG_334), TRUE);
+			MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
+			i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_327), lmprintf(MSG_328),
 				options.String, options.Index, remap8(unattend_xml_mask, map, FALSE));
 			StrArrayDestroy(&options);
 			if (i < 0)
@@ -1683,7 +1593,6 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			i = remap8(i, map, TRUE);
 			unattend_xml_path = CreateUnattendXml(arch, i);
 			// Remember the user preferences for the current session.
-			// TODO: Do we want to save the current mask as a permanent setting?
 			unattend_xml_mask &= ~(remap8(0xff, map, TRUE));
 			unattend_xml_mask |= i;
 			WriteSetting32(SETTING_WUE_OPTIONS, (UNATTEND_DEFAULT_MASK << 16) | unattend_xml_mask);
@@ -2070,7 +1979,7 @@ static void InitDialog(HWND hDlg)
 	uprintf("Syslinux versions: %s%s, %s%s", embedded_sl_version_str[0], embedded_sl_version_ext[0],
 		embedded_sl_version_str[1], embedded_sl_version_ext[1]);
 	uprintf("Grub versions: %s, %s", GRUB4DOS_VERSION, GRUB2_PACKAGE_VERSION);
-	uprintf("System locale ID: 0x%04X (%s)", GetUserDefaultUILanguage(), GetCurrentMUI());
+	uprintf("System locale ID: 0x%04X (%s)", GetUserDefaultUILanguage(), ToLocaleName(GetUserDefaultUILanguage()));
 	ubflush();
 	if (selected_locale->ctrl_id & LOC_NEEDS_UPDATE) {
 		uprintf("NOTE: The %s translation requires an update, but the current translator hasn't submitted "
@@ -2756,7 +2665,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			fs_type = (int)ComboBox_GetCurItemData(hFileSystem);
 			write_as_image = FALSE;
 			write_as_esp = FALSE;
-			unattend_xml_selection = 0;
+			unattend_xml_flags = 0;
 			// Disable all controls except Cancel
 			EnableControls(FALSE, FALSE);
 			FormatStatus = 0;
